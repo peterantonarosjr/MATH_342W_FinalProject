@@ -239,6 +239,7 @@ housingData$garage_exists[grepl("1", housingData$garage_exists)] = "yes"
 length(unique(housingData[,garage_exists])) # 2 unique values including NA
 
 housingData[,garage_exists := factor(garage_exists)]
+setattr(housingData$garage_exists,"levels",c("yes","no"))
 levels(housingData$garage_exists)
 
 ########################################################################################
@@ -343,10 +344,24 @@ finalHousingData = cbind(Ximp$ximp,missingData)
 finalHousingData
 ```
 
+Regression Tree Model
+
+```{r}
+X = finalHousingData[,!c("sale_price","sale_price_miss","date_of_sale","date_of_sale_miss")]
+y = finalHousingData[,sale_price]
+
+
+tree_mod = YARFCART(X, y, calculate_oob_error = FALSE)
+
+g =predict(tree_mod,X)
+sqrt(sum((finalHousingData[,sale_price]-predict(tree_mod,X))^2)/length(finalHousingData[,sale_price]))
+
+```
+
 
 Linear Regression Model
 ```{r}
-X = finalHousingData[,!c("sale_price","sale_price_miss","garage_exists","date_of_sale","garage_exists_miss","date_of_sale_miss")]
+X = finalHousingData[,!c("sale_price","sale_price_miss","date_of_sale","date_of_sale_miss")]
 y = finalHousingData[,sale_price]
 
 testSet = cbind(X,y)
@@ -363,8 +378,6 @@ abline(a = 0,
        b = 1,
        col = "red",
        lwd = 2)
-
-
 
 ```
 
