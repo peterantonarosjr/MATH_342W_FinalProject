@@ -5,11 +5,6 @@ output: pdf_document
 date: ""
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = T,
-                      results = "hide")
-```
-
 Packages & Setup
 ```{r}
 #Packages to load
@@ -22,7 +17,8 @@ pacman::p_load(
   dplyr,
   testthat,
   YARF,
-  lubridate
+  lubridate,
+  missForest
 )
 
 #Memory allocation for Java ~6gb
@@ -133,15 +129,16 @@ Data Cleaning I (Fixing column types)
 dollarSymbolSubset = housingData[,.(common_charges,maintenance_cost,parking_charges,sale_price,total_taxes,listing_price_to_nearest_1000)]
 #Remove dollar signs based on pattern matching
 dollarSymbolSubset[] = lapply(dollarSymbolSubset,gsub,pattern="$",fixed=TRUE,replacement="")
-
+#Also Remove any commas that may appear for large values
+dollarSymbolSubset[] = lapply(dollarSymbolSubset,gsub,pattern=",",fixed=TRUE,replacement="")
 
 #Replace the columns in housing Data with the new dollarSymbolSubset
 housingData[,c("common_charges","maintenance_cost","parking_charges","sale_price","total_taxes","listing_price_to_nearest_1000"):= 
             dollarSymbolSubset[,c("common_charges","maintenance_cost","parking_charges","sale_price","total_taxes","listing_price_to_nearest_1000")]]
 
-
 #Now we need to convert these columns in housing data to integer type
-housingData[,c("common_charges","maintenance_cost","parking_charges","sale_price","total_taxes","listing_price_to_nearest_1000")] = lapply(housingData[,c("common_charges","maintenance_cost","parking_charges","sale_price","total_taxes","listing_price_to_nearest_1000")], as.integer)
+housingData[,c("common_charges","maintenance_cost","parking_charges","sale_price","total_taxes","listing_price_to_nearest_1000")] = lapply(housingData[,c("common_charges","maintenance_cost","parking_charges","sale_price","total_taxes","listing_price_to_nearest_1000")], as.numeric)
+
 
 ########################################################################################
 #Second lets deal with changing cats_allowed and dogs_allowed to factors 
@@ -259,8 +256,6 @@ summary(housingData)
 Data Manipulation I (Creating new columns)
 ```{r}
 #First lets just add up all the charges into a single column 
-chargeCols = c("common_charges","maintenance_cost","parking_charges","total_taxes")
-
 #Assign new column totalCharges to be the row sum of the chargeCols ignoring NA's
 housingData[, totalCharges := rowSums(.SD,na.rm=TRUE), .SDcols = c("common_charges","maintenance_cost","parking_charges","total_taxes")][]
 
@@ -270,58 +265,149 @@ housingData[,sum(is.na(totalCharges))] # No NA's here which is good since
 #Second lets extract the zip codes and assign them to their own column
 
 #Lets use a regular expression to extract the zip code out of this field
-housingData[,zip_code := substr(str_extract(full_address_or_zip_code,"[0-9]{5}"),1,6)]
-
+housingData[,zip_code := substr(str_extract(full_address_or_zip_code,"[0-9]{5}"),1,5)]
+housingData[,zip_code := as.numeric(zip_code)]
 #We can now drop the full_address column since we wont need that 
 housingData[,full_address_or_zip_code := NULL]
 
 
+####################################################################################
+#Third lets add up full and half bathrooms
+#Lets divide the half bathroom columns by 2 so that when we add them it is more granular
+housingData[,num_half_bathrooms:=num_half_bathrooms/2]
+#Assign a new column to represent the total number of bathrooms
+housingData[,totalBathrooms :=rowSums(.SD,na.rm=TRUE), .SDcols = c("num_full_bathrooms","num_half_bathrooms")][]
+
+####################################################################################
+#Fourth lets bring in some extra data that shows median income by zipcode
+queensIncomeDataFilePath = "/home/peterjr/RepoCollections/MATH_342W_FinalProject/Datasets/income_queens_2016.csv"
+queensIncomeData = data.table(read.csv(queensIncomeDataFilePath))
+
+#Grab columns we want and remove the first row description of columns
+queensIncomeData = queensIncomeData[-1,.(GEO_ID,S1901_C01_012E)]
+
+#Change Data Type
+queensIncomeData[,zip_code := as.numeric(GEO_ID)]
+
+
+#Rename median income column
+setnames(queensIncomeData, "S1901_C01_012E", "median_income")
+
+queensIncomeData[,median_income := as.numeric(median_income)]
+
+#Drop the geo_id column
+queensIncomeData[,GEO_ID := NULL]
 
 
 ####################################################################################
-#Lastly, lets just reorder the columns because I don't like how they are ordered now 
-#and its annoying to scroll back and forth for similar columns
+#Fifth lets join this to our housing data on the zipcode
+#We are doing a left join because I want everything in housing preserved -> median income can be imputed
 
-reorderdCols = c(
-  "zip_code","approx_year_built","community_district_num","coop_condo",
-  "fuel_type","garage_exists",
-  "cats_allowed","dogs_allowed","kitchen_type","dining_room_type",
-  "common_charges","maintenance_cost","parking_charges","total_taxes",
-  "pct_tax_deductibl","num_floors_in_building","num_bedrooms","num_half_bathrooms",
-  "num_full_bathrooms","num_total_rooms",
-  "sq_footage","walk_score","listing_price_to_nearest_1000","date_of_sale",
-  "sale_price"
-)
-setcolorder(housingData, reorderdCols)
-
-
-
-housingData
+housingData = left_join(housingData,queensIncomeData,by.x = "zip_code",by.y = "zip_code")
+housingData[,sum(is.na(median_income))] # 64 NA values, not bad since most are getting filled, should be easy to impute
 ```
 
 Imputation Via MissForest on the Data 
 ```{r}
 
+########################################################################################
+#First lets start with the data that we are sure we want to impute
+imputeData = housingData[,.(approx_year_built,cats_allowed,community_district_num,coop_condo,date_of_sale,
+                           dogs_allowed,num_bedrooms,num_floors_in_building,totalBathrooms,
+                           sq_footage,walk_score,zip_code,totalCharges,median_income
+                           )]
+#Rationale as to why we are leaving out some of the categorical columns
+#Garage -> Missing data could imply there is no garage
+#fuel_type -> Missing data could imply some alternate form of energy or perhaps none at all
+#kitchen_type -> Missing data could imply there is no kitchen
+#dining_type -? Missing data could imply there is no dining room
+#We are also not including the columns we used to aggregate into new columns such as half and full bathrooms
+
+
+Ximp = missForest(imputeData,verbose = TRUE)
+#Check the OOB error
+Ximp$OOBerror
+#Assign imputed data table
+imputedHousing = Ximp$ximp
+imputedHousing[,sale_price := housingData[,sale_price]]
+
+
+#########################################################################################
+#Second using this we will now impute the sale price, once all of our other columns have been filled
+Ximp2 = missForest(imputedHousing,verbose = TRUE)
+Ximp2$OOBerror
+
+imputedHousing2 = Ximp2$ximp
+
+#########################################################################################
+#Now let's create our missing dummies for our other categorical features
+missingTable = housingData[,.(garage_exists,fuel_type,kitchen_type,dining_room_type)]
+mRows = nrow(missingTable)
+mCols = ncol(missingTable)
+
+missingDummies = setNames(data.table(matrix(0,nrow = mRows, ncol = mCols)), c("garage_exists_miss", "fuel_type_miss", "kitchen_type_miss","dining_room_type_miss"))
+mNames = names(missingDummies)
+
+gMissing = which(is.na(missingTable[,garage_exists]))
+fMissing = which(is.na(missingTable[,fuel_type]))
+kMissing = which(is.na(missingTable[,kitchen_type]))
+dMissing = which(is.na(missingTable[,dining_room_type]))
+
+
+missList = list(gMissing,fMissing,kMissing,dMissing)
+
+
+for(type in 1:length(missList)){
+  
+  for(missing in missList[[type]]){
+  
+    missingDummies[missing,(mNames[type]):=1]
+  }
+
+}
+
+
+#Now we want to combine these two tables together
+finalHousingData = cbind(imputedHousing2, missingDummies[, 1:4])
+finalHousingData
+```
+
+
+Linear Regression Model
+```{r}
+X = finalHousingData[,.(sq_footage,median_income,totalCharges,garage_exists_miss,walk_score,totalBathrooms,num_bedrooms,kitchen_type_miss,approx_year_built,cats_allowed,dogs_allowed,zip_code,coop_condo)]
+y = finalHousingData[,sale_price]
+
+testSet = cbind(X,y)
+lin_mod = lm(y~.,data=testSet)
+
+
+plot(predict(lin_mod,X),                              
+     y,
+     xlab = "Predicted Values",
+     ylab = "Observed Values")
+abline(a = 0,                                      
+       b = 1,
+       col = "red",
+       lwd = 2)
+
+#In Sample RMSE test
+sqrt(sum((finalHousingData[,sale_price]-predict(lin_mod,X))^2)/length(finalHousingData[,sale_price]))
 
 ```
 
 
+Lasso Regression for Feature Selection
+```{r}
+
+```
 
 
+Random Forest Model
+```{r}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
+```
 
 
 
