@@ -21,8 +21,8 @@ pacman::p_load(
   missForest
 )
 
-#Memory allocation for Java ~6gb
-options(java.parameters = "-Xmx 6000m")
+#Memory allocation for Java ~10gb
+options(java.parameters = "-Xmx 10000m")
 library(rJava)
 .jinit()
 
@@ -244,9 +244,13 @@ levels(housingData$garage_exists)
 
 ########################################################################################
 #Fifth lets take the date column and treat it as an ordinal factor
-housingData[,date_of_sale:= factor(date_of_sale,ordered=TRUE)]
-length(unique(housingData[,date_of_sale]))
 
+#In order to limit the total number of levels in Date, lets just grabs the months
+#We sacrifice some granularity, but hopefully this generalize better
+
+housingData$date_of_sale = format(as.Date(housingData$date_of_sale, format="%m/%d/%Y"),"%m")
+housingData[,date_of_sale:= factor(date_of_sale,ordered=TRUE)]
+length(unique(housingData[,date_of_sale])) #13 including NA which is what we want
 
 #Lets take a look at our data set now
 
@@ -340,7 +344,6 @@ imputeSet = housingData
 Ximp = missForest(imputeSet,verbose = TRUE)
 
 
-
 #Get our final imputed Dataset and bind it to the missiningness table
 setnames(missingData,1:ncol(missingData), paste0(names(missingData)[1:ncol(missingData)], '_miss'))
 
@@ -349,60 +352,151 @@ finalHousingData = cbind(Ximp$ximp,missingData)
 finalHousingData
 ```
 
-Regression Tree Model
 
+Breaking up our data into X and y
 ```{r}
-X = finalHousingData[,!c("sale_price","sale_price_miss","date_of_sale","date_of_sale_miss")]
-y = finalHousingData[,sale_price]
+#Lets break X and y into X_train/_test and y_train/test 
+#Later we will implement K-fold, but for now we want to test oos performance of Lasso and OLS
+K=5
+test_prop = 1 / K
 
+#Training data
+train_indices = sample(1 : nrow(finalHousingData), round((1 - test_prop) * nrow(finalHousingData)))
+train_Data = finalHousingData[train_indices,]
+X_train = train_Data[,!c("sale_price","sale_price_miss")]
+y_train = train_Data$sale_price
 
-tree_mod = YARFCART(X, y, calculate_oob_error = FALSE)
-
-g =predict(tree_mod,X)
-sqrt(sum((finalHousingData[,sale_price]-predict(tree_mod,X))^2)/length(finalHousingData[,sale_price]))
+#Testing data
+test_indices = setdiff(1 : nrow(finalHousingData), train_indices)
+test_Data = finalHousingData[test_indices, ]
+X_test = test_Data[,!c("sale_price","sale_price_miss")]
+y_test = test_Data$sale_price
 
 ```
 
+
+Lasso Regression Model
+```{r}
+#Lets first run lasso regression as a form of feature selection on all of our columns
+library(glmnet)
+
+lasso_mod = cv.glmnet(data.matrix(X_train), y_train, alpha = 1, nfolds = K)
+
+#OOS performance
+yHats_lasso = predict(lasso_mod,data.matrix(X_test))
+
+oosRMSE_lasso = sqrt(sum((y_test-yHats_lasso)^2)/length(y_test))
+
+oosRMSE_lasso
+
+```
+
+```{r}
+#Lets take a look at our coefficients
+coef(lasso_mod, s = lasso_mod$lambda.min)
+```
 
 Linear Regression Model
 ```{r}
-X = finalHousingData[,!c("sale_price","sale_price_miss","date_of_sale","date_of_sale_miss")]
-y = finalHousingData[,sale_price]
+#Lets run a traditional OLS with all of our features
 
+lin_mod = lm(y_train~.,X_train)
 
-lin_mod = lm(y~.,X)
+#OOS performance
+yHats_OLS = predict(lin_mod,X_test)
 
-#In Sample RMSE test
-sqrt(sum((finalHousingData[,sale_price]-predict(lin_mod,X))^2)/length(finalHousingData[,sale_price]))
+oosRMSE_OLS = sqrt(sum((y_test-yHats_OLS)^2)/length(y_test))
 
-plot(predict(lin_mod,X),                              
-     y,
-     xlab = "Predicted Values",
-     ylab = "Observed Values")
-abline(a = 0,                                      
-       b = 1,
-       col = "red",
-       lwd = 2)
-
-
+oosRMSE_OLS
 
 ```
 
 
-Lasso Regression for Feature Selection
+Regression Tree Model
+
 ```{r}
+#Lets fit a single regression tree to our data using all features VS. lasso chosen features
+
+#First lets use all of our features
+regTree_mod_all = YARFCART(X_train, y_train, calculate_oob_error = FALSE)
+
+#OOS performance (all features)
+yHats_RegTree_all = predict(regTree_mod_all,X_test)
+
+oosRMSE_RegTree_all = sqrt(sum((y_test-yHats_RegTree_all)^2)/length(y_test))
+
+
+#Now lets use the lasso features whose coefs are not equal to 0
+X_train_sub = X_train[,!c("cats_allowed_miss","coop_condo_miss","dogs_allowed_miss","garage_exists_miss","totalBathrooms_miss"
+                     ,"walk_score_miss","totalCharges_miss")]
+X_test_sub = X_test[,!c("cats_allowed_miss","coop_condo_miss","dogs_allowed_miss","garage_exists_miss","totalBathrooms_miss"
+                     ,"walk_score_miss","totalCharges_miss")]
+
+
+regTress_mod_sub = YARFCART(X_train_sub, y_train, calculate_oob_error = FALSE)
+
+#OOS performance (subset of features from lasso)
+yHats_RegTree_sub = predict(regTress_mod_sub,X_test_sub)
+oosRMSE_RegTree_sub = sqrt(sum((y_test-yHats_RegTree_sub)^2)/length(y_test))
+
+#Lets view the oos rmse against each other
+oosRMSE_RegTree_all
+oosRMSE_RegTree_sub
+
 
 ```
-
 
 Random Forest Model
 ```{r}
+#Lets run a random Forest model on both sets of features
+
+#First lets use all of our features
+rf_mod_all = YARF(X_train, y_train, calculate_oob_error = FALSE)
+
+#OOS performance (all features)
+yHats_rf_all = predict(rf_mod_all,X_test)
 
 
+oosRMSE_rf_all = sqrt(sum((y_test-yHats_rf_all)^2)/length(y_test))
+
+
+#Now lets use the lasso features whose coefs are not equal to 0
+rf_mod_sub = YARF(X_train_sub, y_train, calculate_oob_error = FALSE)
+
+#OOS performance (subset of features from lasso)
+yHats_rf_sub = predict(rf_mod_sub,X_test_sub)
+oosRMSE_rf_sub = sqrt(sum((y_test-yHats_rf_sub)^2)/length(y_test))
+
+#Lets view the oos rmse against each other
+oosRMSE_rf_all
+oosRMSE_rf_sub
 ```
 
+Bagged Random Forest Model
+```{r}
+#Lets run a bagged random Forest model on both sets of features
+
+#First lets use all of our features
+rfBag_mod_all = YARFBAG(X_train, y_train, calculate_oob_error = FALSE)
+
+#OOS performance (all features)
+yHats_rfBag_all = predict(rfBag_mod_all,X_test)
 
 
+oosRMSE_rfBag_all = sqrt(sum((y_test-yHats_rfBag_all)^2)/length(y_test))
+
+
+#Now lets use the lasso features whose coefs are not equal to 0
+rfBag_mod_sub = YARF(X_train_sub, y_train, calculate_oob_error = FALSE)
+
+#OOS performance (subset of features from lasso)
+yHats_rfBag_sub = predict(rfBag_mod_sub,X_test_sub)
+oosRMSE_rfBag_sub = sqrt(sum((y_test-yHats_rfBag_sub)^2)/length(y_test))
+
+#Lets view the oos rmse against each other
+oosRMSE_rfBag_all
+oosRMSE_rfBag_sub
+```
 
 
 
