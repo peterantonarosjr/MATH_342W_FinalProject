@@ -509,12 +509,12 @@ oosRMSE_rfBag_all
 
 ```
 
-At this point it is pretty obvious that a Random Forest model will perform the best. I am deciding to stick with this model and optimize for it's hyper parameters. I believe this will yield the best OOS performance and given what we know it is expected to perform better than OLS and a single Regression Tree.
+At this point it is pretty obvious that a Random Forest model will perform the best. I am deciding to stick with this model and optimize for it's hyper parameters. I believe this will yield the best OOS performance and given what we know it is expected to perform better than OLS/Lasso and a single Regression Tree. OLS/Lasso suffer from misspecifcation and a single Regression tree is too variable.
 
 Random Forest Model Optimization (Hyper-Parameter Tuning)
 ```{r}
 
-
+finalHousingData
 ```
 
 
