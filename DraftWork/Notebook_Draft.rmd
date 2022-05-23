@@ -383,7 +383,27 @@ Ximp = missForest(imputeSet,verbose = TRUE)
 #Get our final imputed Dataset and bind it to the missiningness table
 finalHousingData = cbind(Ximp$ximp,missingData)
 
-finalHousingData 
+
+#Lets do the same check as in previous for our finalHousingData
+
+numericOnlyData2 = finalHousingData[ , .SD, .SDcols = is.numeric]
+ncol(numericOnlyData2) # 25 total numeric columns
+
+#We expect there to be at most 25 1 values in the nxn correlation matrix for matching columns
+#More than 25 values indicates that there is somewhere else where two different columns are perfectly correlated
+
+correlationMatrix2 = as.matrix(cor(numericOnlyData2))
+
+length(which(correlationMatrix2==1)) # 27 matches for perfect correlation, 2 columns are perfectly correlated
+
+cor(finalHousingData[,"sale_price_miss"],finalHousingData[,"date_of_sale_miss"]) # These are the 2 perfectly correlated columns
+
+#Let's remove sale_price_miss -> Also it makes sense these two are perfectly correlated, a house with no sale price is not sold therefore no date sold
+
+finalHousingData = finalHousingData[,!("sale_price_miss")]
+
+
+finalHousingData
 ```
 
 
@@ -397,21 +417,22 @@ test_prop = 1 / K
 #Training data
 train_indices = sample(1 : nrow(finalHousingData), round((1 - test_prop) * nrow(finalHousingData)))
 train_Data = finalHousingData[train_indices,]
-X_train = train_Data[,!c("sale_price","sale_price_miss")]
+X_train = train_Data[,!c("sale_price")]
 y_train = train_Data$sale_price
 
 #Testing data
 test_indices = setdiff(1 : nrow(finalHousingData), train_indices)
 test_Data = finalHousingData[test_indices, ]
-X_test = test_Data[,!c("sale_price","sale_price_miss")]
+X_test = test_Data[,!c("sale_price")]
 y_test = test_Data$sale_price
+
 
 ```
 
 
 Linear Regression Model
 ```{r}
-#To see if our correlation checks work, we should not recieve the warning "prediction from a rank-deficient fit may be misleading"
+#To see if our correlation checks work, we should not receive the warning "prediction from a rank-deficient fit may be misleading"
 
 #Lets run a traditional OLS with all of our features
 
@@ -423,10 +444,24 @@ yHats_OLS = predict(lin_mod,X_test)
 oosRMSE_OLS = sqrt(sum((y_test-yHats_OLS)^2)/length(y_test))
 
 oosRMSE_OLS
-
 #We do not get the warning "prediction from a rank-deficient fit may be misleading" HOORAY
-```
+#I also would not trust this RMSE simply because it is highly variable (dependent on the split in the above cell)
 
+```
+Linear Regression Model Cross Validated Lasso
+```{r}
+library(glmnet)
+
+lin_mod_lasso = cv.glmnet(data.matrix(X_train),y_train,nfolds=K,alpha = 1)
+opt_Lambda = lin_mod_lasso$lambda.min
+
+yHats_Lasso = predict(lin_mod_lasso, data.matrix(X_test),s = opt_Lambda)
+
+oosRMSE_Lasso = sqrt(sum((y_test-yHats_Lasso)^2)/length(y_test))
+
+oosRMSE_Lasso
+
+```
 
 Regression Tree Model
 
@@ -476,7 +511,7 @@ oosRMSE_rfBag_all
 
 At this point it is pretty obvious that a Random Forest model will perform the best. I am deciding to stick with this model and optimize for it's hyper parameters. I believe this will yield the best OOS performance and given what we know it is expected to perform better than OLS and a single Regression Tree.
 
-Random Forst Model Optimization (Hyper-Parameter Tuning)
+Random Forest Model Optimization (Hyper-Parameter Tuning)
 ```{r}
 
 
