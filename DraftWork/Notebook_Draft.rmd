@@ -7,6 +7,10 @@ date: ""
 
 Packages & Setup
 ```{r}
+
+#Memory allocation for Java ~10gb and Garbage Collection 
+options(java.parameters = c("-XX:+UseConcMarkSweepGC", "-Xmx10000m"))
+
 #Packages to load
 pacman::p_load(
   ggplot2,
@@ -21,11 +25,10 @@ pacman::p_load(
   missForest
 )
 
-#Memory allocation for Java ~10gb
-options(java.parameters = "-Xmx 10000m")
+set_YARF_num_cores(8)
 library(rJava)
+gc()
 .jinit()
-
 ```
 
 The Data
@@ -238,9 +241,14 @@ length(unique(housingData[,garage_exists])) # 3 unique values including NA
 housingData$garage_exists[grepl("1", housingData$garage_exists)] = "yes"
 length(unique(housingData[,garage_exists])) # 2 unique values including NA
 
+
 housingData[,garage_exists := factor(garage_exists)]
 setattr(housingData$garage_exists,"levels",c("yes","no"))
 levels(housingData$garage_exists)
+
+#Fill NA's in garage with No's -> Use 1s in missingness to indicate this later om. 
+housingData[, c("garage_exists")][is.na(housingData[, c("garage_exists")])] = "no"
+
 
 ########################################################################################
 #Fifth lets take the date column and treat it as an ordinal factor
@@ -312,15 +320,16 @@ housingData = left_join(housingData,queensIncomeData,by.x = "zip_code",by.y = "z
 housingData[,sum(is.na(median_income))] # 64 NA values, not bad since most are getting filled, should be easy to impute
 ```
 
-Imputation Via MissForest on the Data 
-```{r}
 
+Dealing with collinearity (Will cause issues later on especially with OLS) 
+```{r}
 ########################################################################################
 #First lets grab the columns that are of interest to us
-housingData = housingData[,.(approx_year_built,cats_allowed,community_district_num,coop_condo,date_of_sale,dining_room_type,dogs_allowed,fuel_type,garage_exists,kitchen_type,num_bedrooms,num_floors_in_building,totalBathrooms,num_total_rooms,sale_price,sq_footage,walk_score,totalCharges,zip_code)]
+housingData = housingData[,.(approx_year_built,cats_allowed,community_district_num,coop_condo,date_of_sale,dining_room_type,
+                             dogs_allowed,fuel_type,garage_exists,kitchen_type,num_bedrooms,num_floors_in_building,totalBathrooms,num_total_rooms,
+                             sale_price,sq_footage,walk_score,totalCharges,zip_code,median_income)]
 
-#Fill NA's in garage with No's -> Use 1s in missingness to indicate this. Imputation yields yes for all which then fails in OLS because of 1 unique val
-housingData[, c("garage_exists")][is.na(housingData[, c("garage_exists")])] = "no"
+
 
 ########################################################################################
 #Second lets build up our missing table 0/` where 1 indicates a NA value in the original 
@@ -330,33 +339,58 @@ colNames = names(housingData)
 missRows = nrow(housingData)
 missCols = ncol(housingData)
 missingData = setNames(data.table(matrix(0,nrow = missRows, ncol = missCols)), colNames)
-
+setnames(missingData,1:ncol(missingData), paste0(names(missingData)[1:ncol(missingData)], '_miss'))
 #Data Set with 1s indicating missing in housingData
 missingData[is.na(housingData)] = 1
 
 
+#Let's get a correlation matrix on the numeric only data in our housing data
+numericOnlyData = housingData[ , .SD, .SDcols = is.numeric]
+ncol(numericOnlyData) # 12 total numeric columns
+
+#We expect there to be at most 12 1 values in the nxn correlation matrix for matching columns
+#More than 12 values indicates that there is somewhere else where two different columns are perfectly correlated
+
+correlationMatrix = as.matrix(cor(numericOnlyData))
+
+length(which(correlationMatrix==1)) # 12 matches for perfect correlation, this is okay since it is columns along the diagonal
+
+
+#Remove missing columns where the sum is 0. Implies housingData did not have any NAs. 
+#Due to the nature of the construction of the missing table, all columns in housingData have a corresponding *_miss column 
+#This isn't fully accurate for the original columns without missingness
+checkZero= function(x){
+    if(sum(x)==0){
+      TRUE
+    } 
+}
+
+length(missingData[,sapply(missingData,  checkZero)]) # 7 columns where no missingness, we will drop these
+
+missingData = missingData[, colSums(missingData != 0) > 0, with = FALSE]
+
+```
+
+
+Imputation Via MissForest on the Data
+```{r}
 ########################################################################################
-#Third lets impute our data set including sale price
-
-
+#Lets impute our data set including sale price
 imputeSet = housingData
 
 Ximp = missForest(imputeSet,verbose = TRUE)
 
-
 #Get our final imputed Dataset and bind it to the missiningness table
-setnames(missingData,1:ncol(missingData), paste0(names(missingData)[1:ncol(missingData)], '_miss'))
-
 finalHousingData = cbind(Ximp$ximp,missingData)
 
-finalHousingData
+finalHousingData 
 ```
 
 
 Breaking up our data into X and y
 ```{r}
 #Lets break X and y into X_train/_test and y_train/test 
-#Later we will implement K-fold, but for now we want to test oos performance of Lasso and OLS
+#Later we will implement K-fold, but for now we want to test oos performance of OLS
 K=5
 test_prop = 1 / K
 
@@ -375,29 +409,10 @@ y_test = test_Data$sale_price
 ```
 
 
-Lasso Regression Model
-```{r}
-#Lets first run lasso regression as a form of feature selection on all of our columns
-library(glmnet)
-
-lasso_mod = cv.glmnet(data.matrix(X_train), y_train, alpha = 1, nfolds = K)
-
-#OOS performance
-yHats_lasso = predict(lasso_mod,data.matrix(X_test))
-
-oosRMSE_lasso = sqrt(sum((y_test-yHats_lasso)^2)/length(y_test))
-
-oosRMSE_lasso
-
-```
-
-```{r}
-#Lets take a look at our coefficients
-coef(lasso_mod, s = lasso_mod$lambda.min)
-```
-
 Linear Regression Model
 ```{r}
+#To see if our correlation checks work, we should not recieve the warning "prediction from a rank-deficient fit may be misleading"
+
 #Lets run a traditional OLS with all of our features
 
 lin_mod = lm(y_train~.,X_train)
@@ -409,96 +424,63 @@ oosRMSE_OLS = sqrt(sum((y_test-yHats_OLS)^2)/length(y_test))
 
 oosRMSE_OLS
 
+#We do not get the warning "prediction from a rank-deficient fit may be misleading" HOORAY
 ```
 
 
 Regression Tree Model
 
 ```{r}
-#Lets fit a single regression tree to our data using all features VS. lasso chosen features
-
-#First lets use all of our features
+#Lets fit a regression tree with all features
 regTree_mod_all = YARFCART(X_train, y_train, calculate_oob_error = FALSE)
 
-#OOS performance (all features)
+#OOS performance 
 yHats_RegTree_all = predict(regTree_mod_all,X_test)
 
 oosRMSE_RegTree_all = sqrt(sum((y_test-yHats_RegTree_all)^2)/length(y_test))
 
-
-#Now lets use the lasso features whose coefs are not equal to 0
-X_train_sub = X_train[,!c("cats_allowed_miss","coop_condo_miss","dogs_allowed_miss","garage_exists_miss","totalBathrooms_miss"
-                     ,"walk_score_miss","totalCharges_miss")]
-X_test_sub = X_test[,!c("cats_allowed_miss","coop_condo_miss","dogs_allowed_miss","garage_exists_miss","totalBathrooms_miss"
-                     ,"walk_score_miss","totalCharges_miss")]
-
-
-regTress_mod_sub = YARFCART(X_train_sub, y_train, calculate_oob_error = FALSE)
-
-#OOS performance (subset of features from lasso)
-yHats_RegTree_sub = predict(regTress_mod_sub,X_test_sub)
-oosRMSE_RegTree_sub = sqrt(sum((y_test-yHats_RegTree_sub)^2)/length(y_test))
-
-#Lets view the oos rmse against each other
 oosRMSE_RegTree_all
-oosRMSE_RegTree_sub
-
 
 ```
 
 Random Forest Model
 ```{r}
-#Lets run a random Forest model on both sets of features
+#Lets fit a random Forest on all features
 
-#First lets use all of our features
 rf_mod_all = YARF(X_train, y_train, calculate_oob_error = FALSE)
 
-#OOS performance (all features)
+#OOS performance 
 yHats_rf_all = predict(rf_mod_all,X_test)
 
 
 oosRMSE_rf_all = sqrt(sum((y_test-yHats_rf_all)^2)/length(y_test))
-
-
-#Now lets use the lasso features whose coefs are not equal to 0
-rf_mod_sub = YARF(X_train_sub, y_train, calculate_oob_error = FALSE)
-
-#OOS performance (subset of features from lasso)
-yHats_rf_sub = predict(rf_mod_sub,X_test_sub)
-oosRMSE_rf_sub = sqrt(sum((y_test-yHats_rf_sub)^2)/length(y_test))
-
-#Lets view the oos rmse against each other
 oosRMSE_rf_all
-oosRMSE_rf_sub
+
 ```
 
 Bagged Random Forest Model
 ```{r}
-#Lets run a bagged random Forest model on both sets of features
+#Lets fit a bagged random forest on all features
 
-#First lets use all of our features
 rfBag_mod_all = YARFBAG(X_train, y_train, calculate_oob_error = FALSE)
 
-#OOS performance (all features)
+#OOS performance 
 yHats_rfBag_all = predict(rfBag_mod_all,X_test)
 
 
 oosRMSE_rfBag_all = sqrt(sum((y_test-yHats_rfBag_all)^2)/length(y_test))
 
-
-#Now lets use the lasso features whose coefs are not equal to 0
-rfBag_mod_sub = YARF(X_train_sub, y_train, calculate_oob_error = FALSE)
-
-#OOS performance (subset of features from lasso)
-yHats_rfBag_sub = predict(rfBag_mod_sub,X_test_sub)
-oosRMSE_rfBag_sub = sqrt(sum((y_test-yHats_rfBag_sub)^2)/length(y_test))
-
-#Lets view the oos rmse against each other
 oosRMSE_rfBag_all
-oosRMSE_rfBag_sub
+
 ```
 
+At this point it is pretty obvious that a Random Forest model will perform the best. I am deciding to stick with this model and optimize for it's hyper parameters. I believe this will yield the best OOS performance and given what we know it is expected to perform better than OLS and a single Regression Tree.
 
+Random Forst Model Optimization (Hyper-Parameter Tuning)
+```{r}
+
+
+```
 
 
 
