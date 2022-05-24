@@ -6,8 +6,9 @@ date: ""
 ---
 
 Packages & Setup
-```{r}
+```{r,set.seed(342)}
 
+knitr::opts_chunk$set(cache = T)
 #Memory allocation for Java ~10gb and Garbage Collection 
 options(java.parameters = c("-XX:+UseConcMarkSweepGC", "-Xmx10000m"))
 
@@ -70,7 +71,6 @@ names(housingData)
 
 #Getting some general information about the table
 summary(housingData)
-
 ```
 
 **Column Name | Information | Notes to Self about column**
@@ -245,16 +245,15 @@ housingData$garage_exists[grepl("1", housingData$garage_exists)] = "yes"
 length(unique(housingData[,garage_exists])) # 2 unique values including NA
 
 
-housingData[,garage_exists := factor(garage_exists)]
-setattr(housingData$garage_exists,"levels",c("yes","no"))
-levels(housingData$garage_exists)
-
 #Fill NA's in garage with No's -> Use 1s in missingness to indicate this later om. 
 housingData[, c("garage_exists")][is.na(housingData[, c("garage_exists")])] = "no"
 
-
+housingData[,c("garage_exists")] = lapply(housingData[,c("garage_exists")], as.factor)
+#setattr(housingData$garage_exists,"levels",c("no","yes"))
+#housingData[,garage_exists := factor(garage_exists)]
+levels(housingData$garage_exists)
 ########################################################################################
-#Fifth lets take the date column and treat it as an ordinal factor
+#Fifth lets take the date column treat is a an unordered factor
 
 #In order to limit the total number of levels in Date, lets just grabs the months
 #We sacrifice some granularity, but hopefully this generalize better
@@ -265,7 +264,7 @@ length(unique(housingData[,date_of_sale])) #13 including NA which is what we wan
 
 #Lets take a look at our data set now
 
-housingData
+ncol(housingData)
 summary(housingData)
 ```
 
@@ -482,8 +481,6 @@ registerDoParallel(cluster)
 ################################################################
 #Evaluating Feature Selection
 
-#Set our seed for consistent results
-set.seed(243)
 # 5 fold cross validation repeated 2 times
 control_selection =  rfeControl(functions=rfFuncs, method="repeatedcv", number=5,repeats=2)
 
@@ -512,7 +509,6 @@ ggplot(data = feat_Importance, aes(x=reorder(feature,-importance),y=importance ,
 
 Let's set up a sub finalHousingData table with only the important features
 ```{r}
-
 
 subsetF = c(predictors(trained_selection),"sale_price") # let's also add back the sale_price
 
@@ -571,7 +567,7 @@ yHats_OLS = predict(lin_mod,X_test)
 oosRMSE_OLS = sqrt(sum((y_test-yHats_OLS)^2)/length(y_test))
 
 oosRMSE_OLS
-#We do not get the warning "prediction from a rank-deficient fit may be misleading" HOORAY
+
 ```
 
 
@@ -759,8 +755,30 @@ print(rf_optimized)
 
 Random Forest Model Optimization (Hyper-Parameter Tuning) -YARFBAG
 ```{r}
+#
+#
+#
+# USE HOLDOUT SET FOR GENERLIZATION ERROR FOR RANDOM FORESTS
+#
+#
 
 
+ggplot(data=subset(housingData, !is.na(sale_price))) +
+  aes(x = sale_price) +
+  geom_histogram(bins = 50L, fill = "blue")+
+  geom_vline(data = subset(housingData, !is.na(sale_price)), aes(xintercept = mean(sale_price)), color = "red",size=1)+
+  annotate("text", x=290000, y=45, label=paste("Mean"),size=4.1,angle=90)+
+  geom_vline(data = subset(housingData, !is.na(sale_price)), aes(xintercept = median(sale_price)), color = "yellow",size=1)+
+  annotate("text", x=230000, y=45, label=paste("Median"),size=4.1,angle=90)+
+  labs(x = "Sale Price", y = "Frequency")+
+  ggtitle("Histogram of Sale Price")+
+  theme(plot.title = element_text(hjust = 0.5))
+  
+ggsave("SalePriceHist.png",width=6, height=4,dpi=400)
+
+
+
+str(finalHousingData)
 ```
 
 
