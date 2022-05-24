@@ -22,10 +22,13 @@ pacman::p_load(
   testthat,
   YARF,
   lubridate,
-  missForest
+  missForest,
+  parallel,
+  doParallel
 )
 
-set_YARF_num_cores(8)
+num_of_cores = 8
+set_YARF_num_cores(num_of_cores)
 library(rJava)
 gc()
 .jinit()
@@ -257,7 +260,7 @@ housingData[, c("garage_exists")][is.na(housingData[, c("garage_exists")])] = "n
 #We sacrifice some granularity, but hopefully this generalize better
 
 housingData$date_of_sale = format(as.Date(housingData$date_of_sale, format="%m/%d/%Y"),"%m")
-housingData[,date_of_sale:= factor(date_of_sale,ordered=TRUE)]
+housingData[,date_of_sale:= factor(date_of_sale,ordered=FALSE)]
 length(unique(housingData[,date_of_sale])) #13 including NA which is what we want
 
 #Lets take a look at our data set now
@@ -266,7 +269,7 @@ housingData
 summary(housingData)
 ```
 
-Data Manipulation I (Creating new columns)
+Data Manipulation I (Creating/Adding new columns)
 ```{r}
 #First lets just add up all the charges into a single column 
 #Assign new column totalCharges to be the row sum of the chargeCols ignoring NA's
@@ -318,6 +321,58 @@ queensIncomeData[,GEO_ID := NULL]
 
 housingData = left_join(housingData,queensIncomeData,by.x = "zip_code",by.y = "zip_code")
 housingData[,sum(is.na(median_income))] # 64 NA values, not bad since most are getting filled, should be easy to impute
+```
+
+
+Initial Data Exploration (Basic Visualization & Some Basic Stats)
+```{r}
+##########################################################################
+#First lets take a look at sale_price. It is important we understand this since it is our response
+sale_density = ggplot(housingData)+
+  geom_density(aes(x=sale_price)) # From here we can see a concentration around ~ 225k
+
+sale_density
+#########################################################################
+#Second lets take a look at some basic statistics about sale_price
+sd(housingData$sale_price,na.rm = TRUE)
+median(housingData$sale_price,na.rm = TRUE)
+mean(housingData$sale_price,na.rm = TRUE) # Mean higher than median makes sense with tail in graph above
+min(housingData$sale_price,na.rm = TRUE)
+max(housingData$sale_price,na.rm = TRUE)
+
+
+#########################################################################
+#Third lets look at some of the columns against sale_price
+#I am looking at columns that I need will have the biggest influence on sale_price
+
+bedrooms_sale = ggplot(housingData)+
+  geom_point(aes(x=num_bedrooms, y=sale_price))# Looking at num_bedrooms VS sale_price
+
+
+cats_sale = ggplot(housingData)+
+  geom_point(aes(x=cats_allowed, y=sale_price)) # Looking at cats_allowed VS sale_price
+
+
+dogs_sale = ggplot(housingData)+
+  geom_point(aes(x=dogs_allowed, y=sale_price)) # Looking at dogs_allowed VS sale_price
+
+#This is a feature we created from num_full_bathrooms + (num_half_bathrooms)/2
+bathroooms_sale = ggplot(housingData)+
+  geom_point(aes(x=totalBathrooms, y=sale_price)) # Looking at totalBathrooms VS sale_price
+
+#This is a feature we created by adding up all of the chargest columns
+charges_sale = ggplot(housingData)+
+  geom_point(aes(x=totalCharges, y=sale_price)) # Looking at totalCharges VS sale_price
+
+walk_sale = ggplot(housingData)+
+  geom_point(aes(x=walk_score, y=sale_price)) # Looking at walk_score VS sale_price
+
+cats_sale
+dogs_sale
+bedrooms_sale
+bathroooms_sale
+charges_sale
+walk_sale
 ```
 
 
@@ -394,7 +449,7 @@ ncol(numericOnlyData2) # 25 total numeric columns
 
 correlationMatrix2 = as.matrix(cor(numericOnlyData2))
 
-length(which(correlationMatrix2==1)) # 27 matches for perfect correlation, 2 columns are perfectly correlated
+length(which(correlationMatrix2==1)) # 27 matches for perfect correlation, no issues here
 
 cor(finalHousingData[,"sale_price_miss"],finalHousingData[,"date_of_sale_miss"]) # These are the 2 perfectly correlated columns
 
@@ -402,8 +457,68 @@ cor(finalHousingData[,"sale_price_miss"],finalHousingData[,"date_of_sale_miss"])
 
 finalHousingData = finalHousingData[,!("sale_price_miss")]
 
+```
 
-finalHousingData
+Final Data Visualization
+```{r}
+################################################################
+# Let's look at some of our imputed columns against sale_price
+dining_type = ggplot(finalHousingData)+
+  geom_boxplot(aes(x=dining_room_type,y=sale_price))
+
+dining_type
+
+
+```
+
+
+Feature Importance/Selection
+```{r}
+library(caret)
+#Setting up parallelization cluster
+cluster = makePSOCKcluster(num_of_cores)
+registerDoParallel(cluster)
+
+################################################################
+#Evaluating Feature Selection
+
+#Set our seed for consistent results
+set.seed(243)
+# 5 fold cross validation repeated 2 times
+control_selection =  rfeControl(functions=rfFuncs, method="repeatedcv", number=5,repeats=2)
+
+#We want to train it on the entire data just so we can see what subset of features are the best
+trained_selection = rfe(data.matrix(finalHousingData[,!c("sale_price")]),data.matrix(finalHousingData[,c("sale_price")]),sizes=c(1:ncol(finalHousingData)),rfeControl=control_selection)
+
+#Stop the cluster
+stopCluster(cluster)
+registerDoSEQ()
+
+print(trained_selection)
+
+predictors(trained_selection)
+
+#Plot our RMSE by the number of variables
+ggplot(data = trained_selection)+theme_bw()
+
+feat_Importance = data.frame(feature = row.names(varImp(trained_selection)), importance = varImp(trained_selection)[,1])
+
+ggplot(data = feat_Importance, aes(x=reorder(feature,-importance),y=importance ,fill = feature))+
+  geom_bar(stat="identity")+ 
+  labs(x = "Features", y = "Variable Importance")
+
+```
+
+
+Let's set up a sub finalHousingData table with only the important features
+```{r}
+
+
+subsetF = c(predictors(trained_selection),"sale_price") # let's also add back the sale_price
+
+finalHousingData_Sub = finalHousingData[,..subsetF]
+
+finalHousingData_Sub
 ```
 
 
@@ -414,29 +529,41 @@ Breaking up our data into X and y
 K=5
 test_prop = 1 / K
 
-#Training data
+#Training data (All features)
 train_indices = sample(1 : nrow(finalHousingData), round((1 - test_prop) * nrow(finalHousingData)))
 train_Data = finalHousingData[train_indices,]
 X_train = train_Data[,!c("sale_price")]
 y_train = train_Data$sale_price
 
-#Testing data
+#Testing data (All features)
 test_indices = setdiff(1 : nrow(finalHousingData), train_indices)
 test_Data = finalHousingData[test_indices, ]
 X_test = test_Data[,!c("sale_price")]
 y_test = test_Data$sale_price
 
 
+#Training data (Feature Selection)
+train_indices_sub = sample(1 : nrow(finalHousingData_Sub), round((1 - test_prop) * nrow(finalHousingData_Sub)))
+train_Data_sub = finalHousingData_Sub[train_indices_sub,]
+X_train_sub = train_Data_sub[,!c("sale_price")]
+y_train_sub = train_Data_sub$sale_price
+
+#Testing data (Feature Selection)
+test_indices_sub = setdiff(1 : nrow(finalHousingData_Sub), train_indices)
+test_Data_sub = finalHousingData_Sub[test_indices_sub, ]
+X_test_sub = test_Data_sub[,!c("sale_price")]
+y_test_sub = test_Data_sub$sale_price
+
 ```
 
 
-Linear Regression Model
+Linear Regression Model (Full Dataset)
 ```{r}
 #To see if our correlation checks work, we should not receive the warning "prediction from a rank-deficient fit may be misleading"
 
 #Lets run a traditional OLS with all of our features
 
-lin_mod = lm(y_train~.,X_train)
+lin_mod = lm(y_train~.,X_train,x = TRUE, y = TRUE)
 
 #OOS performance
 yHats_OLS = predict(lin_mod,X_test)
@@ -445,10 +572,57 @@ oosRMSE_OLS = sqrt(sum((y_test-yHats_OLS)^2)/length(y_test))
 
 oosRMSE_OLS
 #We do not get the warning "prediction from a rank-deficient fit may be misleading" HOORAY
-#I also would not trust this RMSE simply because it is highly variable (dependent on the split in the above cell)
+```
+
+
+Linear Regression Model (Important Feature Dataset)
+```{r}
+#Lets run a traditional OLS with the feature selected from recursive feature elimination 
+
+lin_mod_sub = lm(y_train_sub~.,X_train_sub,x = TRUE, y = TRUE)
+
+#OOS performance
+yHats_OLS_sub = predict(lin_mod_sub,X_test_sub)
+
+oosRMSE_OLS_sub = sqrt(sum((y_test_sub-yHats_OLS_sub)^2)/length(y_test_sub))
+
+oosRMSE_OLS_sub
 
 ```
-Linear Regression Model Cross Validated Lasso
+I would not really trust either of the previous results from the OLS Models because they are not cross validated. The results we see are highly dependent on the train/test splits we initialized in the cells above. To fix this lets make two cross validated OLS Models and compare their RMSE.
+
+Cross Validated Linear Regression Model (All & Important Features)
+```{r}
+
+train_cv = trainControl(method = "cv", number = K)
+
+#Create a model that is cross validated on the training portion of our all feature data
+ols_all_cv = train(sale_price~., data=data.matrix(train_Data),method="lm", trControl = train_cv)
+
+#Create a model that is cross validated on the training portion of our important feature data
+ols_sub_cv = train(sale_price~., data=data.matrix(train_Data_sub),method="lm", trControl = train_cv)
+
+#Predict for both models
+yHats_OLS_all_cv = predict(ols_all_cv,data.matrix(X_test))
+
+yHats_OLS_sub_cv = predict(ols_sub_cv,data.matrix(X_test_sub))
+
+
+#OOS performance of both models
+oosRMSE_OLS_all_cv = sqrt(sum((y_test-yHats_OLS_all_cv)^2)/length(y_test)) #Here there is no difference between y_test and y_test_sub
+oosRMSE_OLS_sub_cv = sqrt(sum((y_test_sub-yHats_OLS_sub_cv)^2)/length(y_test_sub)) #It is done merely for consistency in var names
+
+
+oosRMSE_OLS_all_cv
+oosRMSE_OLS_sub_cv 
+
+#At this point model selection would be needed to choose the better model. These are just less variated RMSE values 
+```
+
+
+For fun lets see how a cross validated lasso does on our full feature dataset. Hopefully it can bring non-important features to zero 
+
+Linear Regression Model Cross Validated Lasso (Full Dataset)
 ```{r}
 library(glmnet)
 
@@ -463,7 +637,8 @@ oosRMSE_Lasso
 
 ```
 
-Regression Tree Model
+
+Regression Tree Model (Full Dataset)
 
 ```{r}
 #Lets fit a regression tree with all features
@@ -478,10 +653,26 @@ oosRMSE_RegTree_all
 
 ```
 
-Random Forest Model
+
+Regression Tree Model (Sub Dataset)
+```{r}
+#Lets fit a regression tree with sub features
+regTree_mod_sub = YARFCART(X_train_sub, y_train_sub, calculate_oob_error = FALSE)
+
+#OOS performance 
+yHats_RegTree_sub = predict(regTree_mod_sub,X_test_sub)
+
+oosRMSE_RegTree_sub = sqrt(sum((y_test_sub-yHats_RegTree_sub)^2)/length(y_test_sub))
+
+oosRMSE_RegTree_sub
+```
+
+Again these are not to be fully trusted. I would not ship this model and report these as the error metrics. What this does show us tho
+
+
+Random Forest Model (Full Dataset)
 ```{r}
 #Lets fit a random Forest on all features
-
 rf_mod_all = YARF(X_train, y_train, calculate_oob_error = FALSE)
 
 #OOS performance 
@@ -493,30 +684,84 @@ oosRMSE_rf_all
 
 ```
 
-Bagged Random Forest Model
-```{r}
-#Lets fit a bagged random forest on all features
 
-rfBag_mod_all = YARFBAG(X_train, y_train, calculate_oob_error = FALSE)
+Random Forest Model (Sub Dataset)
+```{r}
+#Lets fit a random Forest on sub features
+rf_mod_sub = YARF(X_train_sub, y_train_sub, calculate_oob_error = FALSE)
 
 #OOS performance 
-yHats_rfBag_all = predict(rfBag_mod_all,X_test)
+yHats_rf_sub = predict(rf_mod_sub,X_test_sub)
 
 
-oosRMSE_rfBag_all = sqrt(sum((y_test-yHats_rfBag_all)^2)/length(y_test))
-
-oosRMSE_rfBag_all
+oosRMSE_rf_sub = sqrt(sum((y_test_sub-yHats_rf_sub)^2)/length(y_test_sub))
+oosRMSE_rf_sub
 
 ```
 
-At this point it is pretty obvious that a Random Forest model will perform the best. I am deciding to stick with this model and optimize for it's hyper parameters. I believe this will yield the best OOS performance and given what we know it is expected to perform better than OLS/Lasso and a single Regression Tree. OLS/Lasso suffer from misspecifcation and a single Regression tree is too variable.
 
-Random Forest Model Optimization (Hyper-Parameter Tuning)
+Bagged Random Forest Model (Full Dataset)
+```{r}
+#Lets fit a bagged random forest on all features
+rfBag_mod_all = YARFBAG(X_train, y_train, calculate_oob_error = TRUE)
+
+#OOS performance 
+rfBag_mod_all$rmse_oob
+
+```
+
+
+Bagged Random Forest Model (Sub Dataset)
+```{r}
+#Lets fit a bagged random forest on sub features
+rfBag_mod_sub = YARFBAG(X_train_sub, y_train_sub, calculate_oob_error = TRUE)
+
+#OOS performance 
+rfBag_mod_sub$rmse_oob
+
+```
+
+We can trust the two bagged model metrics. For starters it is clear that Random Forests is the winning algorithm. Random Forests is able to reduce the specification error by using a larger H space.
+
+Random Forest Model Optimization (Hyper-Parameter Tuning) -R Packages
+```{r}
+#Hyper-Parameter Tuning
+#Setting up parallelization cluster
+cluster = makePSOCKcluster(num_of_cores)
+registerDoParallel(cluster)
+
+
+control_rf = trainControl(method='oob', number=K, search = 'random')
+
+#Metric compare model is Accuracy
+
+mtry = ncol(finalHousingData_Sub)
+nTree = 500
+tunegrid = expand.grid(.mtry=seq(1,mtry))
+
+rf_optimized = train(sale_price~., 
+                      data=data.matrix(finalHousingData_Sub), 
+                      method='rf', 
+                      metric='RMSE', 
+                      tuneGrid=tunegrid,
+                      nTree = nTree,
+                      trControl=control_rf
+                     )
+
+#Stop the cluster
+stopCluster(cluster)
+registerDoSEQ()
+
+
+print(rf_optimized)
+
+```
+
+Random Forest Model Optimization (Hyper-Parameter Tuning) -YARFBAG
 ```{r}
 
-finalHousingData
-```
 
+```
 
 
 
