@@ -212,7 +212,7 @@ length(unique(housingData[,fuel_type])) # 7 "unique" values including NA
 #Lets deal with the capitalization issues for fuel_typenone
 housingData[,fuel_type := tolower(fuel_type)]
 housingData$fuel_type[grepl("none", housingData$fuel_type)] = "other"
-length(unique(housingData[,fuel_type])) # 6 unique values including NA
+length(unique(housingData[,fuel_type])) # r unique values including NA
 housingData[,fuel_type := factor(fuel_type)] 
 levels(housingData$fuel_type)
 
@@ -470,11 +470,11 @@ cluster = makePSOCKcluster(num_of_cores)
 registerDoParallel(cluster)
 
 #Initialize the missForest algorithm with 500 trees and parallelization
-Ximp = missForest(imputeSet,verbose = TRUE, ntree = 500, parallelize = "forests")
+Ximp = missForest(imputeSet,verbose = TRUE, maxiter = 3,ntree = 100, parallelize = "variables")
 
 #Stop the cluster
 stopCluster(cluster)
-registerDoSEQ()
+
 
 #Get our final imputed Dataset and bind it to the missiningness table
 finalHousingData = cbind(Ximp$ximp,missingData)
@@ -533,7 +533,7 @@ trained_selection = rfe(data.matrix(finalHousingData_Train[,!c("sale_price")]),d
 
 #Stop the cluster
 stopCluster(cluster)
-registerDoSEQ()
+
 
 #Uncomment the following line to see a printout of the trained selection
 #print(trained_selection)
@@ -557,10 +557,10 @@ Contending With Collinear Features
 ```{r}
 #Lets build a table consisting of only numeric values from finalHousingData
 numericOnlyData2 = finalHousingData_Train[ , .SD, .SDcols = is.numeric]
-ncol(numericOnlyData2) # 25 total numeric columns
+ncol(numericOnlyData2) # total numeric columns
 
-#Here we see that there are 25 total columns. We expect at most 25 perfect collinearities in our pxp correlation matrix when i==j
-#Greater than 25 columns indicates that there is perfect collinearity when i!=j
+#We expect at most p perfect collinearities in our pxp correlation matrix when i==j
+#Greater than p columns indicates that there is perfect collinearity when i!=j
 
 correlationMatrix2 = as.matrix(cor(numericOnlyData2))
 
@@ -576,7 +576,7 @@ Feature Selection (Using Results From Feature Importance & Collinearity Explorat
 #This was done in an effort to reduce the noise produced by irrelevant features in the  hopes of reducing model prediction error
 
 #Let's get a list of our features ranked by importance from the previous cell
-varImp(trained_selection) #Both date_of_sale_miss and sale_price_miss score low and nearly identically
+varImp(trained_selection)
 
 #Thinking about this logically, it would be wise to retain sale_price_miss for the following reasons.
 #For starters, sale_price was imputed and so it would be wise to retain a marker indicating this
@@ -850,7 +850,7 @@ cluster = makePSOCKcluster(num_of_cores)
 registerDoParallel(cluster)
 
 
-control_rf = trainControl(method='oob', number=K, search = 'random')
+control_rf = trainControl(method='repeatedcv', number=K, repeats=2,search = 'random')
 
 mtry = ncol(finalHousingDataImpFeat_subTrain) # Columns in our important feature set
 nTree = 500
@@ -867,10 +867,20 @@ rf_optimized = train(sale_price~.,
 
 #Stop the cluster
 stopCluster(cluster)
-registerDoSEQ()
 
+
+#Holdout Set Performance
+yHats_bgfOpt_Holdout = predict(rf_optimized,data.matrix(X_imp_holdout))
+
+oosRMSE_bgfOpt_Holdout = sqrt(sum((y_imp_holdout-yHats_bgfOpt_Holdout)^2)/length(y_imp_holdout))
+
+SSR_bgfOpt_Holdout = sum((y_imp_holdout - yHats_bgfOpt_Holdout) ^ 2)  ## residual sum of squares
+SST_bgfOpt_Holdout = sum((y_imp_holdout - mean(y_imp_holdout)) ^ 2)  ## total sum of squares
+Rsq_bgfOpt_Holdout = 1 - SSR/SST
 
 print(rf_optimized)
+oosRMSE_bgfOpt_Holdout
+Rsq_bgfOpt_Holdout
 
 ```
 
@@ -885,10 +895,10 @@ registerDoParallel(cluster)
 #Lets combine the Train and Test Portion of our important feature data set into a single entity
 finalHousingData_ImpFeat = rbind(finalHousingDataImpFeat_Train,finalHousingDataImpFeat_Test)
 
-control_rf = trainControl(method='oob', number=K, search = 'random')
+control_rf = trainControl(method='repeatedcv', number=K, repeats=2,search = 'random')
 
 mtry = ncol(finalHousingData_ImpFeat) # Columns in our important feature set
-nTree = 1000
+nTree = 500
 tunegrid = expand.grid(.mtry=seq(1,mtry))
 
 rf_optimizedFinal = train(sale_price~., 
@@ -902,7 +912,6 @@ rf_optimizedFinal = train(sale_price~.,
 
 #Stop the cluster
 stopCluster(cluster)
-registerDoSEQ()
 
 
 print(rf_optimizedFinal)
