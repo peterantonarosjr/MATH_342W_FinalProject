@@ -469,12 +469,12 @@ imputeSet = housingData
 cluster = makePSOCKcluster(num_of_cores)
 registerDoParallel(cluster)
 
-#Initialize the missForest algorithm with 500 trees and parallelization
-Ximp = missForest(imputeSet,verbose = TRUE, maxiter = 3,ntree = 100, parallelize = "variables")
+#Initialize the missForest algorithm with 100 trees and parallelization
+Ximp = missForest(imputeSet,verbose = TRUE, maxiter = 5, ntree = 100, parallelize = "variables")
 
 #Stop the cluster
 stopCluster(cluster)
-
+registerDoSEQ()
 
 #Get our final imputed Dataset and bind it to the missiningness table
 finalHousingData = cbind(Ximp$ximp,missingData)
@@ -533,7 +533,7 @@ trained_selection = rfe(data.matrix(finalHousingData_Train[,!c("sale_price")]),d
 
 #Stop the cluster
 stopCluster(cluster)
-
+registerDoSEQ()
 
 #Uncomment the following line to see a printout of the trained selection
 #print(trained_selection)
@@ -591,7 +591,6 @@ finalHousingDataImpFeat_Train = finalHousingData_Train[,..subsetF]
 
 #Add back our sale price and sale price missingsince subsetF did not include sale_price as it was excluded from feature importance due to it being our response
 finalHousingDataImpFeat_Train[,sale_price := finalHousingData_Train[,c("sale_price")]]
-
 ```
 
 
@@ -707,8 +706,15 @@ yHats_OLS_holdout_imp = predict(lin_mod_imp,X_imp_holdout)
 
 oosRMSE_OLS_holdout_imp = sqrt(sum((y_imp_holdout-yHats_OLS_holdout_imp)^2)/length(y_imp_holdout))
 
+
+SSR_olsImp_Holdout = sum((y_imp_holdout - yHats_OLS_holdout_imp) ^ 2)  ## residual sum of squares
+SST_olsImp_Holdout = sum((y_imp_holdout - mean(y_imp_holdout)) ^ 2)  ## total sum of squares
+Rsq_olsImp_Holdout = 1 - SSR_olsImp_Holdout/SST_olsImp_Holdout
+
+lin_mod_imp$coefficients
 oosRMSE_OLS_test_imp
 oosRMSE_OLS_holdout_imp
+Rsq_olsImp_Holdout
 
 ```
 
@@ -743,13 +749,18 @@ yHats_OLS_imp_cvHoldout = predict(ols_imp_cv,data.matrix(X_imp_holdout))
 oosRMSE_OLS_all_cvHoldout = sqrt(sum((y_all_holdout-yHats_OLS_all_cvHoldout)^2)/length(y_all_holdout))
 oosRMSE_OLS_imp_cvHoldout = sqrt(sum((y_imp_holdout-yHats_OLS_imp_cvHoldout)^2)/length(y_imp_holdout))
 
+SSR_olsImp_cvHoldout = sum((y_imp_holdout - yHats_OLS_imp_cvHoldout) ^ 2)  ## residual sum of squares
+SST_olsImp_cvHoldout = sum((y_imp_holdout - mean(y_imp_holdout)) ^ 2)  ## total sum of squares
+Rsq_olsImp_cvHoldout = 1 - SSR_olsImp_cvHoldout/SST_olsImp_cvHoldout
 
 
 oosRMSE_OLS_all_cvTest
 oosRMSE_OLS_all_cvHoldout
 
+coefficients(lin_mod_lasso)
 oosRMSE_OLS_imp_cvTest
 oosRMSE_OLS_imp_cvHoldout
+Rsq_olsImp_cvHoldout
 
 #Notice we are being warned about a rank deficiency in our full feature data set. This is expected since the features are too closely correlated
 #We should not trust the first two values because of this
@@ -773,8 +784,13 @@ yHats_LassoHoldout = predict(lin_mod_lasso, data.matrix(X_all_holdout),s = opt_L
 
 oosRMSE_Lasso_Holdout = sqrt(sum((y_all_holdout-yHats_LassoHoldout)^2)/length(y_all_holdout))
 
+SSR_lasso_cvHoldout = sum((y_imp_holdout - yHats_LassoHoldout) ^ 2)  ## residual sum of squares
+SST_lasso_cvHoldout = sum((y_imp_holdout - mean(y_imp_holdout)) ^ 2)  ## total sum of squares
+Rsq_lasso_cvHoldout = 1 - SSR_lasso_cvHoldout/SST_lasso_cvHoldout
+
 oosRMSE_Lasso_Test
 oosRMSE_Lasso_Holdout
+Rsq_lasso_cvHoldout
 #At this point we will stop using the full feature data and stick with our important feature data set
 ```
 
@@ -795,9 +811,16 @@ yHats_RegTree_Holdout = predict(regTree_mod,X_imp_holdout)
 
 oosRMSE_RegTree_Holdout = sqrt(sum((y_imp_holdout-yHats_RegTree_Holdout)^2)/length(y_imp_holdout))
 
+SSR_regTree_Holdout = sum((y_imp_holdout - yHats_RegTree_Holdout) ^ 2)  ## residual sum of squares
+SST_regTree_Holdout = sum((y_imp_holdout - mean(y_imp_holdout)) ^ 2)  ## total sum of squares
+Rsq_regTree_Holdout = 1 - SSR_regTree_Holdout/SST_regTree_Holdout
+
+#Uncomment the following line to save an illustration of the tree
+#illustrate_trees(regTree_mod, max_depth=5, open_file=TRUE)
 
 oosRMSE_RegTree_Test
 oosRMSE_RegTree_Holdout
+Rsq_regTree_Holdout
 ```
 
 
@@ -817,8 +840,13 @@ yHats_rf_Holdout = predict(rf_mod,X_imp_holdout)
 
 oosRMSE_rf_Holdout = sqrt(sum((y_imp_holdout-yHats_rf_Holdout)^2)/length(y_imp_holdout))
 
+SSR_rf_Holdout = sum((y_imp_holdout - yHats_rf_Holdout) ^ 2)  ## residual sum of squares
+SST_rf_Holdout = sum((y_imp_holdout - mean(y_imp_holdout)) ^ 2)  ## total sum of squares
+Rsq_rf_Holdout = 1 - SSR_rf_Holdout/SST_rf_Holdout
+
 oosRMSE_rf_Test
 oosRMSE_rf_Holdout
+Rsq_rf_Holdout
 ```
 
 
@@ -836,8 +864,13 @@ yHats_brf_Holdout = predict(rfBag_mod,X_imp_holdout)
 
 oosRMSE_brf_Holdout = sqrt(sum((y_imp_holdout-yHats_brf_Holdout)^2)/length(y_imp_holdout))
 
+SSR_rfBag_Holdout = sum((y_imp_holdout - yHats_brf_Holdout) ^ 2)  ## residual sum of squares
+SST_rfBag_Holdout = sum((y_imp_holdout - mean(y_imp_holdout)) ^ 2)  ## total sum of squares
+Rsq_rfBag_Holdout = 1 - SSR_rfBag_Holdout/SST_rfBag_Holdout
+
 oosRMSE_brf_Bag
 oosRMSE_brf_Holdout
+Rsq_rfBag_Holdout
 ```
 
 
@@ -867,7 +900,7 @@ rf_optimized = train(sale_price~.,
 
 #Stop the cluster
 stopCluster(cluster)
-
+registerDoSEQ()
 
 #Holdout Set Performance
 yHats_bgfOpt_Holdout = predict(rf_optimized,data.matrix(X_imp_holdout))
@@ -876,12 +909,11 @@ oosRMSE_bgfOpt_Holdout = sqrt(sum((y_imp_holdout-yHats_bgfOpt_Holdout)^2)/length
 
 SSR_bgfOpt_Holdout = sum((y_imp_holdout - yHats_bgfOpt_Holdout) ^ 2)  ## residual sum of squares
 SST_bgfOpt_Holdout = sum((y_imp_holdout - mean(y_imp_holdout)) ^ 2)  ## total sum of squares
-Rsq_bgfOpt_Holdout = 1 - SSR/SST
+Rsq_bgfOpt_Holdout = 1 - SSR_bgfOpt_Holdout/SST_bgfOpt_Holdout
 
 print(rf_optimized)
 oosRMSE_bgfOpt_Holdout
 Rsq_bgfOpt_Holdout
-
 ```
 
 
@@ -912,7 +944,7 @@ rf_optimizedFinal = train(sale_price~.,
 
 #Stop the cluster
 stopCluster(cluster)
-
+registerDoSEQ()
 
 print(rf_optimizedFinal)
 
