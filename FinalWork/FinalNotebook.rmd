@@ -448,6 +448,10 @@ length(missingData[,sapply(missingData,  checkZero)]) # 7 columns with no missin
 
 missingData = missingData[, colSums(missingData != 0) > 0, with = FALSE]
 
+#Lets also drop missingness for sale_price. This will be made clear later, but since we plan on training on all of the imputed sale prices
+#our missing will be all 1's aka a zero variance feature.
+missingData = missingData[,!c("sale_price_miss")]
+
 #Lets mark the indices where sale price is missing for reasons that will be made clear later
 salePriceMissingIndices = which(is.na(housingData$sale_price))
 salePriceFilledIndices = which(!is.na(housingData$sale_price))
@@ -486,26 +490,20 @@ Establishing Holdout Set I
 #Prior to any feature selection/modeling we want to establish a hold out set from our finalHousing Data
 #We do this so that we can truly consider our hold out test set to be independent from any of the processes we do below
 
-#Let's leave ~10% of our total data as a final honest holdout
-holdout_K=10
+holdout_K=5
 holdout_prop = 1 / holdout_K
 
-#Where sale price was NA prior to imputing we leave for training ~ 75%
+#Where sale price was NA prior to imputing  ~ 75% of ALL data
 salePriceNA_Data = finalHousingData[salePriceMissingIndices,] 
 
-#This is crucial to note since our errors will be more honest. 
+#This is crucial to note since our errors will be more honest albeit larger. 
 #If we test on imputed data we are essentially computing prediction error on a prediction rather than real data
 #Most likely this will result in worse error, but it will generalize better in the real world. 
 
-#Where sale price was not NA we leave for testing ~ 25%
+#Where sale price was not NA ~ 25% of ALL data
 salePriceFilled_Data = finalHousingData[salePriceFilledIndices,]
 
 #Training & Testing data (All Features)
-#finalHousingData_trainIndices = sample(1 : nrow(finalHousingData), round((1 - holdout_prop) * nrow(finalHousingData)))
-#finalHousingData_testIndices =  setdiff(1 : nrow(finalHousingData), finalHousingData_trainIndices)
-
-#finalHousingData_Train = finalHousingData[finalHousingData_trainIndices,] 
-#finalHousingData_Test = finalHousingData[finalHousingData_testIndices,] #This is our holdout set here
 finalHousingData_Train = salePriceNA_Data
 finalHousingData_Test = salePriceFilled_Data
 
@@ -527,8 +525,8 @@ registerDoParallel(cluster)
 ################################################################
 #Evaluating Feature Importance
 
-# 5 fold cross validation repeated 3 times
-control_selection =  rfeControl(functions=rfFuncs, method="repeatedcv", number=5,repeats=3)
+# 5 fold cross validation repeated 2 times
+control_selection =  rfeControl(functions=rfFuncs, method="repeatedcv", number=5,repeats=2)
 
 #We want to train it on the entire data just so we can see what subset of features are the best (excluding sale price since this is our response)
 trained_selection = rfe(data.matrix(finalHousingData_Train[,!c("sale_price")]),data.matrix(finalHousingData_Train[,c("sale_price")]),sizes=c(1:ncol(finalHousingData_Train)),rfeControl=control_selection)
@@ -566,12 +564,8 @@ ncol(numericOnlyData2) # 25 total numeric columns
 
 correlationMatrix2 = as.matrix(cor(numericOnlyData2))
 
-length(which(correlationMatrix2==1)) # 27 matches for perfect correlation there is an issue with this
+length(which(correlationMatrix2==1))
 
-
-cor(finalHousingData_Train[,"sale_price_miss"],finalHousingData_Train[,"date_of_sale_miss"]) # These are the 2 perfectly correlated columns where i!=j
-
-#This perfect correlation existing makes conceptual sense, since a sale price missing implies there is no date of sale.
 ```
 
 
@@ -592,12 +586,10 @@ varImp(trained_selection) #Both date_of_sale_miss and sale_price_miss score low 
 #Get the subset of features from the trained selection
 subsetF = c(predictors(trained_selection))
 
-subsetF = subsetF[!subsetF %in% c("date_of_sale_miss")]
-
 #Create a secondary finalHousingData table with only our selected features & response
 finalHousingDataImpFeat_Train = finalHousingData_Train[,..subsetF]
 
-#Add back our sale price since subsetF did not include sale_price as it was excluded from feature importance due to it being our response
+#Add back our sale price and sale price missingsince subsetF did not include sale_price as it was excluded from feature importance due to it being our response
 finalHousingDataImpFeat_Train[,sale_price := finalHousingData_Train[,c("sale_price")]]
 
 ```
@@ -633,8 +625,8 @@ setequal(dim(finalHousingData_Test)[1], dim(finalHousingDataImpFeat_Test)[1])
 
 Splitting Sets Into Train & Test
 ```{r}
-#Let's leave ~10% of our total data for testing
-K=10
+#Let's leave ~20% of our total data for testing
+K=5
 prop = 1 /K
 
 #All Feature Set
@@ -861,7 +853,7 @@ registerDoParallel(cluster)
 control_rf = trainControl(method='oob', number=K, search = 'random')
 
 mtry = ncol(finalHousingDataImpFeat_subTrain) # Columns in our important feature set
-nTree = 1000
+nTree = 500
 tunegrid = expand.grid(.mtry=seq(1,mtry))
 
 rf_optimized = train(sale_price~., 
