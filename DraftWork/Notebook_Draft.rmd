@@ -399,15 +399,15 @@ missingData[is.na(housingData)] = 1
 
 
 #Let's get a correlation matrix on the numeric only data in our housing data
-numericOnlyData = housingData[ , .SD, .SDcols = is.numeric]
-ncol(numericOnlyData) # 12 total numeric columns
+#numericOnlyData = housingData[ , .SD, .SDcols = is.numeric]
+#ncol(numericOnlyData) # 12 total numeric columns
 
 #We expect there to be at most 12 1 values in the nxn correlation matrix for matching columns
 #More than 12 values indicates that there is somewhere else where two different columns are perfectly correlated
 
-correlationMatrix = as.matrix(cor(numericOnlyData))
+#correlationMatrix = as.matrix(cor(numericOnlyData))
 
-length(which(correlationMatrix==1)) # 12 matches for perfect correlation, this is okay since it is columns along the diagonal
+#length(which(correlationMatrix==1)) # 12 matches for perfect correlation, this is okay since it is columns along the diagonal
 
 
 #Remove missing columns where the sum is 0. Implies housingData did not have any NAs. 
@@ -448,7 +448,7 @@ ncol(numericOnlyData2) # 25 total numeric columns
 
 correlationMatrix2 = as.matrix(cor(numericOnlyData2))
 
-length(which(correlationMatrix2==1)) # 27 matches for perfect correlation, no issues here
+length(which(correlationMatrix2==1)) # 27 matches for perfect correlation
 
 cor(finalHousingData[,"sale_price_miss"],finalHousingData[,"date_of_sale_miss"]) # These are the 2 perfectly correlated columns
 
