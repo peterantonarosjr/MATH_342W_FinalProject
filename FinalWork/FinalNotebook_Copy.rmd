@@ -1,0 +1,625 @@
+---
+title: "Final Project Copy"
+author: "Peter Antonaros"
+output: pdf_document
+date: ""
+---
+
+
+Packages/Libraries & Setup
+```{r,set.seed(342)}
+#Set cache for seed
+knitr::opts_chunk$set(cache = T)
+#Memory allocation for Java ~10gb and Garbage Collection 
+options(java.parameters = c("-XX:+UseConcMarkSweepGC", "-Xmx10000m"))
+#Packages to load
+pacman::p_load(
+  ggplot2,
+  tidyverse,
+  data.table,
+  R.utils,
+  magrittr,
+  dplyr,
+  testthat,
+  YARF,
+  lubridate,
+  missForest,
+  parallel,
+  doParallel,
+  caret,
+  glmnet
+)
+
+#Set CPU cores for YARF
+num_of_cores = 8
+set_YARF_num_cores(num_of_cores)
+#Initialize rJava
+library(rJava)
+gc()
+.jinit()
+```
+
+
+The Data
+```{r}
+#Set our file path & read in file
+housingDataFilePath = "/home/peterjr/RepoCollections/MATH_342W_FinalProject/Datasets/housing_data_2016_2017.csv"
+#Keep a unaltered "True" copy
+housingDataTrue = data.table(fread(housingDataFilePath))
+
+housingData = housingDataTrue
+
+housingData
+#Relevant columns begin at the column labeled (URL)
+```
+
+
+
+Initial Data Preparation I (Dropping Irrelevant Columns & Storing Possible Ones for Later Use)
+```{r}
+#Dropping Mturk columns that are not relevant to our housing model
+housingData[,c(1:27):=NULL]
+
+#Save the urls in case they are needed
+housingURLS = housingData[,.(URL)]
+
+#Dropping URL from the data table
+housingData[,URL:=NULL]
+#Dropping other useless url column from data table (ALL NA's)
+housingData[,url:=NULL]
+#Dropping model_type because similar information is contained in other columns
+housingData[,model_type:=NULL]
+
+housingData
+```
+
+
+
+Initial Data Preparation II (Writing some notes about Columns)
+```{r}
+#Getting the column names to write some notes about each column
+names(housingData)
+
+#Getting some general information about the table
+summary(housingData)
+```
+**Column Name | Information | Notes to Self about column**
+
+**"approx_year_built" | Integer representing the year the house was built | 40 NA's**
+
+**"cats_allowed" | Binary decision (0,1) are cats allowed in the home or not | Check for NA's & Factor**
+
+**"common_charges" | Some sort of charges in dollars ($) | Remove the dollar symbol & Convert to integer & Check for NA's**
+
+**"community_district_num" | Integer representing the district number of community home is a part of | 19 NA's**
+
+**"coop_condo" | String representing "Co-op" or "Condo" | Lowercase everything | Check for levels & Factor**
+
+**"date_of_sale" | String representing the date the home was sold | **
+
+**"dining_room_type" | String representing "formal" or "combo" dining room type | Lowercase everything & Check for NA's & Factor**
+
+**"dogs_allowed" | Binary decision (0,1) are dogs allowed in the home or not | Factor this & Check for NA's**
+
+**"fuel_type" | String representing "gas", "oil", or "other" energy source for the home | Lowercase everything & Check for NA's & factor**
+
+**"full_address_or_zip_code" | String representing the address of the home | **
+
+**"garage_exists" | String representing "Yes" if the home has a garage | Check for NA's & Factor this & Missingness column**
+
+**"kitchen_type" | String representing "Eat-In", "Efficiency", or "Combo" kitchen type | Lowercase everything & Factor this & Check for NA's**
+
+**"maintenance_cost" | Cost of maintenece for the home in dollars ($) | Remove the dollar symbol & Convert to integer & Check for NA's**
+
+**"num_bedrooms" | Integer representing number of bedrooms present in the home | 115 NA's**
+
+**"num_floors_in_building" | Integer representing number of floors present in building containing home | 650 NA's**
+
+**"num_full_bathrooms" | Integer representing the number of full bathrooms present in the home | No NA's**
+
+**"num_half_bathrooms" | Integer representing the number of half bathrooms present in the home | 2058 NA's**
+
+**"num_total_rooms" | Integer representing the number of total rooms present in the home | 2 NA's**
+
+**"parking_charges" | Parking charges in dollars ($) | Remove the dollar symbol & Convert to integer & Check for NA's**
+
+**"pct_tax_deductibl" | Integer representing percent of tax deduction | 1754 NA's**
+
+**"sale_price" | Sale price of the home in dollars ($) | Remove the dollar symbol & Convert to integer & Check for NA's**
+
+**"sq_footage" | Integer representing the total square footage of the home | 1210 NA's**
+
+**"total_taxes" | Taxes on the home in dollars ($) | Remove the dollar symbol & Convert to integer & Check for NA's**
+
+**"walk_score" | Integer representing a walking score for the home | **
+
+**"listing_price_to_nearest_1000" | Listing price to the nearest 1000 for the home in dollars ($) | Remove the dollar symbol & Convert to integer & Check for NA's**
+
+
+
+Data Cleaning I (Symbol Removal & Establishing Column Types)
+```{r}
+#First lets deal with the String columns that have $ symbols and convert to integer
+
+#Extract dollar sign columns as subset to operate on
+dollarSymbolSubset = housingData[,.(common_charges,maintenance_cost,parking_charges,sale_price,total_taxes,listing_price_to_nearest_1000)]
+#Remove dollar signs based on pattern matching
+dollarSymbolSubset[] = lapply(dollarSymbolSubset,gsub,pattern="$",fixed=TRUE,replacement="")
+#Also Remove any commas that may appear for large values
+dollarSymbolSubset[] = lapply(dollarSymbolSubset,gsub,pattern=",",fixed=TRUE,replacement="")
+
+#Replace the columns in housing Data with the new dollarSymbolSubset
+housingData[,c("common_charges","maintenance_cost","parking_charges","sale_price","total_taxes","listing_price_to_nearest_1000"):= 
+            dollarSymbolSubset[,c("common_charges","maintenance_cost","parking_charges","sale_price","total_taxes","listing_price_to_nearest_1000")]]
+
+#Now we need to convert these columns in housing data to integer type
+housingData[,c("common_charges","maintenance_cost","parking_charges","sale_price","total_taxes","listing_price_to_nearest_1000")] = lapply(housingData[,c("common_charges","maintenance_cost","parking_charges","sale_price","total_taxes","listing_price_to_nearest_1000")], as.numeric)
+
+
+########################################################################################
+#Second lets deal with changing cats_allowed and dogs_allowed to factors 
+
+housingData[,sum(is.na(cats_allowed))] # No NA values for cats_allowed
+housingData[,sum(is.na(dogs_allowed))] # No NA values for dogs_allowed
+
+#Changing to factors for cats and dogs allowed
+unique(housingData[,cats_allowed]) # 3 "unique" values
+
+#Lets deal with the y instead of a yes
+housingData$cats_allowed[grepl("y", housingData$cats_allowed)] = "yes"
+length(unique(housingData[,cats_allowed])) # 2 unique values
+
+#Lets do the same for dogs
+unique(housingData[,dogs_allowed]) # 3 "unique" values"
+housingData$dogs_allowed[grepl("yes89", housingData$dogs_allowed)] = "yes"
+length(unique(housingData[,cats_allowed])) # 2 unique values
+
+#Factor them
+housingData[,c("cats_allowed","dogs_allowed")] = lapply(housingData[,c("cats_allowed","dogs_allowed")], as.factor)
+
+levels(housingData$cats_allowed) #Check levels
+levels(housingData$dogs_allowed) #Check levels
+
+########################################################################################
+#Third lets deal with the other String columns that need to be factored (track NA's for later)
+
+housingData[,sum(is.na(coop_condo))] # No NA values for coop_condo
+length(unique(housingData[,coop_condo])) # 2 unique values 
+
+#Factor it
+housingData[,coop_condo := factor(coop_condo)]
+levels(housingData$coop_condo)
+
+
+housingData[,sum(is.na(dining_room_type))] # 448 NA values for dining_room_type
+length(unique(housingData[,dining_room_type])) # 6 unique values including NA
+length(which(housingData$dining_room_type == "none")) #none occurs 2 times
+length(which(housingData$dining_room_type == "dining area")) #dining area occurs 2 times
+
+#Lets deal with the issue of "dining area" as the room type and consider it as type other
+housingData$dining_room_type[grepl("dining area", housingData$dining_room_type)] = "other"
+length(unique(housingData[,dining_room_type])) # 5 unique values including NA
+
+housingData[,dining_room_type := factor(dining_room_type)]
+levels(housingData$dining_room_type)
+
+
+housingData[,sum(is.na(fuel_type))] # 112 NA values for dining_room_type
+length(unique(housingData[,fuel_type])) # 7 "unique" values including NA
+
+#Lets deal with the capitalization issues for fuel_typenone
+housingData[,fuel_type := tolower(fuel_type)] 
+length(unique(housingData[,fuel_type])) # 6 unique values including NA
+housingData[,fuel_type := factor(fuel_type)] 
+levels(housingData$fuel_type)
+
+
+housingData[,sum(is.na(kitchen_type))]# 16 NA values for dining_room_type
+length(unique(housingData[,kitchen_type])) # 14 "unique" values including NA
+
+#Lets deal with the upper case lower case kitchen type differences
+housingData[,kitchen_type:=tolower(kitchen_type)] # Lowercase everything to pattern match 
+length(unique(housingData[,kitchen_type])) # 11 "unique" values including NA
+
+#Lets now deal with spaces creating more unique values
+housingData[,kitchen_type := lapply(kitchen_type,gsub,pattern="eat in",fixed=TRUE,replacement="eatin")]
+length(unique(housingData[,kitchen_type])) # 10 "unique" values including NA
+
+#Lets lets deal with the misspellings of efficiency kitchen
+housingData$kitchen_type[grepl("effic", housingData$kitchen_type)] = "efficiency"
+length(unique(housingData[,kitchen_type])) # 6 unique values including NA
+
+#Finally lets deal with 1955 and replace that with NA -> I am assuming here 1955 is wrong and not a type of kitchen 
+housingData[, kitchen_type := sapply(kitchen_type, function(x) replace(x, which(x=="1955"), NA))]
+length(unique(housingData[,kitchen_type])) # t unique values including NA (no 1955 -> NA)
+housingData[,kitchen_type := factor(kitchen_type)]
+levels(housingData$kitchen_type)
+
+########################################################################################
+#Fourth lets deal with the Garage column (track NA's for later)
+
+housingData[,sum(is.na(garage_exists))] # 1826 NA values for garage exists
+length(unique(housingData[,garage_exists])) # 7 "unique" values
+
+#Lets deal with the capitalization and misspelling of yes
+housingData[,garage_exists := tolower(garage_exists)]
+housingData$garage_exists[grepl("y", housingData$garage_exists)] = "yes"
+length(unique(housingData[,garage_exists])) # 5 unique values including NA
+
+#Lets treat underground and ug as yes
+housingData$garage_exists[grepl("u", housingData$garage_exists)] = "yes"
+length(unique(housingData[,garage_exists])) # 3 unique values including NA
+
+#Lets treat 1 as a yes
+housingData$garage_exists[grepl("1", housingData$garage_exists)] = "yes"
+length(unique(housingData[,garage_exists])) # 2 unique values including NA
+
+
+#Fill NA's in garage with No's -> Use 1s in missingness to indicate this later om. 
+housingData[, c("garage_exists")][is.na(housingData[, c("garage_exists")])] = "no"
+
+housingData[,c("garage_exists")] = lapply(housingData[,c("garage_exists")], as.factor)
+#setattr(housingData$garage_exists,"levels",c("no","yes"))
+#housingData[,garage_exists := factor(garage_exists)]
+levels(housingData$garage_exists)
+########################################################################################
+#Fifth lets take the date column treat is a an unordered factor
+
+#In order to limit the total number of levels in Date, lets just grabs the months
+#We sacrifice some granularity, but hopefully this generalize better
+
+housingData$date_of_sale = format(as.Date(housingData$date_of_sale, format="%m/%d/%Y"),"%m")
+housingData[,date_of_sale:= factor(date_of_sale,ordered=FALSE)]
+length(unique(housingData[,date_of_sale])) #13 including NA which is what we want
+
+#Lets take a look at our data set now
+
+ncol(housingData)
+summary(housingData)
+```
+
+
+
+Data Manipulation I (Creating New Features)
+```{r}
+#First lets just add up all the charges into a single column 
+#Assign new column totalCharges to be the row sum of the chargeCols ignoring NA's
+housingData[, totalCharges := rowSums(.SD,na.rm=TRUE), .SDcols = c("common_charges","maintenance_cost","parking_charges","total_taxes")][]
+
+housingData[,sum(is.na(totalCharges))] # No NA's here which is good since 
+
+####################################################################################
+#Second lets extract the zip codes and assign them to their own column
+
+#Lets use a regular expression to extract the zip code out of this field
+housingData[,zip_code := substr(str_extract(full_address_or_zip_code,"[0-9]{5}"),1,5)]
+housingData[,zip_code := as.numeric(zip_code)]
+#We can now drop the full_address column since we wont need that 
+housingData[,full_address_or_zip_code := NULL]
+
+
+####################################################################################
+#Third lets add up full and half bathrooms
+#Lets divide the half bathroom columns by 2 so that when we add them it is more granular
+housingData[,num_half_bathrooms:=num_half_bathrooms/2]
+#Assign a new column to represent the total number of bathrooms
+housingData[,totalBathrooms :=rowSums(.SD,na.rm=TRUE), .SDcols = c("num_full_bathrooms","num_half_bathrooms")][]
+
+####################################################################################
+#Fourth lets bring in some extra data that shows median income by zipcode
+queensIncomeDataFilePath = "/home/peterjr/RepoCollections/MATH_342W_FinalProject/Datasets/income_queens_2016.csv"
+queensIncomeData = data.table(read.csv(queensIncomeDataFilePath))
+
+#Grab columns we want and remove the first row description of columns
+queensIncomeData = queensIncomeData[-1,.(GEO_ID,S1901_C01_012E)]
+
+#Change Data Type
+queensIncomeData[,zip_code := as.numeric(GEO_ID)]
+
+
+#Rename median income column
+setnames(queensIncomeData, "S1901_C01_012E", "median_income")
+
+queensIncomeData[,median_income := as.numeric(median_income)]
+
+#Drop the geo_id column
+queensIncomeData[,GEO_ID := NULL]
+
+
+####################################################################################
+#Fifth lets join this to our housing data on the zipcode
+#We are doing a left join because I want everything in housing preserved -> median income can be imputed
+
+housingData = left_join(housingData,queensIncomeData,by.x = "zip_code",by.y = "zip_code")
+housingData[,sum(is.na(median_income))] # 64 NA values, not bad since most are getting filled, should be easy to impute
+```
+
+
+
+Initial Data Exploration I (Basic Visualization & Stats)
+```{r}
+##########################################################################
+#First lets take a look at sale_price. It is important we understand this since it is our response
+sale_density = ggplot(housingData)+
+  geom_density(aes(x=sale_price)) # From here we can see a concentration around ~ 225k
+
+sale_density
+#########################################################################
+#Second lets take a look at some basic statistics about sale_price
+sd(housingData$sale_price,na.rm = TRUE)
+median(housingData$sale_price,na.rm = TRUE)
+mean(housingData$sale_price,na.rm = TRUE) # Mean higher than median makes sense with tail in graph above
+min(housingData$sale_price,na.rm = TRUE)
+max(housingData$sale_price,na.rm = TRUE)
+
+
+#########################################################################
+#Third lets look at some of the columns against sale_price
+#I am looking at columns that I need will have the biggest influence on sale_price
+
+bedrooms_sale = ggplot(housingData)+
+  geom_point(aes(x=num_bedrooms, y=sale_price))# Looking at num_bedrooms VS sale_price
+
+
+cats_sale = ggplot(housingData)+
+  geom_point(aes(x=cats_allowed, y=sale_price)) # Looking at cats_allowed VS sale_price
+
+
+dogs_sale = ggplot(housingData)+
+  geom_point(aes(x=dogs_allowed, y=sale_price)) # Looking at dogs_allowed VS sale_price
+
+#This is a feature we created from num_full_bathrooms + (num_half_bathrooms)/2
+bathroooms_sale = ggplot(housingData)+
+  geom_point(aes(x=totalBathrooms, y=sale_price)) # Looking at totalBathrooms VS sale_price
+
+#This is a feature we created by adding up all of the chargest columns
+charges_sale = ggplot(housingData)+
+  geom_point(aes(x=totalCharges, y=sale_price)) # Looking at totalCharges VS sale_price
+
+walk_sale = ggplot(housingData)+
+  geom_point(aes(x=walk_score, y=sale_price)) # Looking at walk_score VS sale_price
+
+cats_sale
+dogs_sale
+bedrooms_sale
+bathroooms_sale
+charges_sale
+walk_sale
+```
+
+
+
+Initial Data Exploration II (Better visualizations)
+```{r}
+
+ggplot(data=subset(housingData, !is.na(sale_price))) +
+  aes(x = sale_price) +
+  geom_histogram(bins = 50L, fill = "blue")+
+  geom_vline(data = subset(housingData, !is.na(sale_price)), aes(xintercept = mean(sale_price)), color = "red",size=1)+
+  annotate("text", x=290000, y=45, label=paste("Mean"),size=4.1,angle=90)+
+  geom_vline(data = subset(housingData, !is.na(sale_price)), aes(xintercept = median(sale_price)), color = "yellow",size=1)+
+  annotate("text", x=230000, y=45, label=paste("Median"),size=4.1,angle=90)+
+  labs(x = "Sale Price", y = "Frequency")+
+  ggtitle("Histogram of Sale Price")+
+  theme(plot.title = element_text(hjust = 0.5))
+  
+ggsave("SalePriceHist.png",width=6, height=4,dpi=400)
+
+
+```
+
+
+
+Establishing a Missingness Table
+```{r}
+########################################################################################
+#First lets grab the columns that are of interest to us
+housingData = housingData[,.(approx_year_built,cats_allowed,community_district_num,coop_condo,date_of_sale,dining_room_type,
+                             dogs_allowed,fuel_type,garage_exists,kitchen_type,num_bedrooms,num_floors_in_building,totalBathrooms,num_total_rooms,
+                             sale_price,sq_footage,walk_score,totalCharges,zip_code,median_income)]
+
+########################################################################################
+#Second lets build up our missing table 0/1 where 1 indicates a NA value in the housingData
+
+#Create a missing data table and fill with zeros
+colNames = names(housingData)
+missRows = nrow(housingData)
+missCols = ncol(housingData)
+missingData = setNames(data.table(matrix(0,nrow = missRows, ncol = missCols)), colNames)
+setnames(missingData,1:ncol(missingData), paste0(names(missingData)[1:ncol(missingData)], '_miss'))
+#Data Set with 1s indicating missing in housingData
+missingData[is.na(housingData)] = 1
+
+#Due to the nature of the construction of the missing table, all columns in housingData have a corresponding *_miss column
+#This may not be entirely accurate, since some of our columns in housingData have no NA's thus the *_miss column will be all 0's
+
+#Remove missing columns where the sum is 0. Implies housingData did not have any NAs. 
+checkZero= function(x){
+    if(sum(x)==0){
+      TRUE
+    } 
+}
+
+length(missingData[,sapply(missingData,  checkZero)]) # 7 columns with no missingness, we will drop these, since no imputation will occur here
+
+missingData = missingData[, colSums(missingData != 0) > 0, with = FALSE]
+```
+
+
+
+Imputation Using The MissForest Algorithm
+```{r}
+########################################################################################
+#Lets impute our data set including sale price
+imputeSet = housingData
+
+Ximp = missForest(imputeSet,verbose = TRUE)
+
+#Get our final imputed Dataset and bind it to the missiningness table
+finalHousingData = cbind(Ximp$ximp,missingData)
+
+```
+
+
+
+Feature Importance
+```{r}
+#Setting up parallelization cluster
+cluster = makePSOCKcluster(num_of_cores)
+registerDoParallel(cluster)
+
+################################################################
+#Evaluating Feature Importance
+
+# 5 fold cross validation repeated 2 times
+control_selection =  rfeControl(functions=rfFuncs, method="repeatedcv", number=5,repeats=2)
+
+#We want to train it on the entire data just so we can see what subset of features are the best
+trained_selection = rfe(data.matrix(finalHousingData[,!c("sale_price")]),data.matrix(finalHousingData[,c("sale_price")]),sizes=c(1:ncol(finalHousingData)),rfeControl=control_selection)
+
+#Stop the cluster
+stopCluster(cluster)
+registerDoSEQ()
+
+print(trained_selection)
+
+predictors(trained_selection)
+
+#Plot our RMSE by the number of variables
+ggplot(data = trained_selection)+theme_bw()
+
+feat_Importance = data.frame(feature = row.names(varImp(trained_selection)), importance = varImp(trained_selection)[,1])
+
+ggplot(data = feat_Importance, aes(x=reorder(feature,-importance),y=importance ,fill = feature))+
+  geom_bar(stat="identity")+ 
+  labs(x = "Features", y = "Variable Importance")
+
+```
+
+
+
+Contending With Collinear Features
+```{r}
+
+
+```
+
+
+
+Feature Selection (Using Results From Feature Importance & Collinearity Exploration)
+```{r}
+
+
+```
+
+
+
+Establishing New Data Table (Subset of finalHousingData)
+```{r}
+
+#Subset of features we will be using from finalHousingData
+subsetF = c(predictors(trained_selection),"sale_price") # Add back sale price since we excluded it from feature importance
+
+finalHousingData_Sub = finalHousingData[,..subsetF]
+
+#finalHousingData_sub where the features < features from finalHousingData
+finalHousingData_Sub
+```
+
+
+
+Establishing Holdout Sets (Full & Sub Data Set)
+```{r}
+
+
+```
+
+
+
+Linear Regression Model (Full Data Set)
+```{r}
+
+
+```
+
+
+Linear Regression Model (Sub Data Set)
+```{r}
+
+
+```
+
+
+
+Cross Validated Linear Model (Full & Sub Data Set)
+```{r}
+
+
+```
+
+
+
+Linear Regression Model Cross Validated Lasso (Full Dataset)
+```{r}
+
+
+```
+
+
+
+Regression Tree Model (Full Data Set)
+```{r}
+
+
+```
+
+
+
+Regression Tree Model (Sub Data Set)
+```{r}
+
+
+```
+
+
+
+Random Forest Model (Full Data Set)
+```{r}
+
+
+```
+
+
+
+Random Forest Model (Sub Data Set)
+```{r}
+
+
+```
+
+
+
+Bagged Random Forest Model (Full Data Set)
+```{r}
+
+
+```
+
+
+
+Bagged Random Forest Model (Sub Data Set)
+```{r}
+
+
+```
+
+
+
+Bagged Random Forest Model Optimization (Hyper-Parameter Tuning)
+```{r}
+
+
+```
+
+
+
