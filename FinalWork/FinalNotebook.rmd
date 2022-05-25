@@ -1,5 +1,5 @@
 ---
-title: "Final Project Copy"
+title: "Final Project"
 author: "Peter Antonaros"
 output: pdf_document
 date: ""
