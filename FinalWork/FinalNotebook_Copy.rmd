@@ -402,8 +402,9 @@ ggplot(data=subset(housingData, !is.na(sale_price))) +
   labs(x = "Sale Price", y = "Frequency")+
   ggtitle("Histogram of Sale Price")+
   theme(plot.title = element_text(hjust = 0.5))
-  
-ggsave("SalePriceHist.png",width=6, height=4,dpi=400)
+ 
+#Uncomment the following line if we want to save this picture to our notebook directory 
+#gsave("SalePriceHist.png",width=6, height=4,dpi=400)
 
 
 ```
@@ -453,11 +454,47 @@ Imputation Using The MissForest Algorithm
 #Lets impute our data set including sale price
 imputeSet = housingData
 
-Ximp = missForest(imputeSet,verbose = TRUE)
+#Setting up parallelization cluster
+cluster = makePSOCKcluster(num_of_cores)
+registerDoParallel(cluster)
+
+#Initialize the missForest algorithm with 500 trees and parallelization
+Ximp = missForest(imputeSet,verbose = TRUE, ntree = 500, parallelize = "forests")
+
+#Stop the cluster
+stopCluster(cluster)
+registerDoSEQ()
 
 #Get our final imputed Dataset and bind it to the missiningness table
 finalHousingData = cbind(Ximp$ximp,missingData)
 
+finalHousingData 
+```
+
+
+
+Establishing Holdout Set I
+```{r}
+#Prior to any feature selection/modeling we want to establish a hold out set from our finalHousing Data
+#We do this so that we can truly consider our hold out test set to be independent from any of the processes we do below
+
+#Let's leave ~10% of our total data as a final honest holdout
+holdout_K=10
+holdout_prop = 1 / holdout_K
+
+#Training & Testing data (All Features)
+finalHousingData_trainIndices = sample(1 : nrow(finalHousingData), round((1 - holdout_prop) * nrow(finalHousingData)))
+finalHousingData_testIndices =  setdiff(1 : nrow(finalHousingData), finalHousingData_trainIndices)
+
+finalHousingData_Train = finalHousingData[finalHousingData_trainIndices,] 
+finalHousingData_Test = finalHousingData[finalHousingData_testIndices,] #This is our holdout set here
+
+X_all_holdout = finalHousingData_Test[,!c("sale_price")] 
+y_all_holdout = finalHousingData_Test$sale_price
+
+
+finalHousingData_Train 
+finalHousingData_Test 
 ```
 
 
@@ -471,17 +508,18 @@ registerDoParallel(cluster)
 ################################################################
 #Evaluating Feature Importance
 
-# 5 fold cross validation repeated 2 times
-control_selection =  rfeControl(functions=rfFuncs, method="repeatedcv", number=5,repeats=2)
+# 5 fold cross validation repeated 3 times
+control_selection =  rfeControl(functions=rfFuncs, method="repeatedcv", number=5,repeats=3)
 
-#We want to train it on the entire data just so we can see what subset of features are the best
-trained_selection = rfe(data.matrix(finalHousingData[,!c("sale_price")]),data.matrix(finalHousingData[,c("sale_price")]),sizes=c(1:ncol(finalHousingData)),rfeControl=control_selection)
+#We want to train it on the entire data just so we can see what subset of features are the best (excluding sale price since this is our response)
+trained_selection = rfe(data.matrix(finalHousingData_Train[,!c("sale_price")]),data.matrix(finalHousingData_Train[,c("sale_price")]),sizes=c(1:ncol(finalHousingData_Train)),rfeControl=control_selection)
 
 #Stop the cluster
 stopCluster(cluster)
 registerDoSEQ()
 
-print(trained_selection)
+#Uncomment the following line to see a printout of the trained selection
+#print(trained_selection)
 
 predictors(trained_selection)
 
@@ -500,52 +538,166 @@ ggplot(data = feat_Importance, aes(x=reorder(feature,-importance),y=importance ,
 
 Contending With Collinear Features
 ```{r}
+#Lets build a table consisting of only numeric values from finalHousingData
+numericOnlyData2 = finalHousingData_Train[ , .SD, .SDcols = is.numeric]
+ncol(numericOnlyData2) # 25 total numeric columns
+
+#Here we see that there are 25 total columns. We expect at most 25 perfect collinearities in our pxp correlation matrix when i==j
+#Greater than 25 columns indicates that there is perfect collinearity when i!=j
+
+correlationMatrix2 = as.matrix(cor(numericOnlyData2))
+
+length(which(correlationMatrix2==1)) # 27 matches for perfect correlation there is an issue with this
 
 
+cor(finalHousingData_Train[,"sale_price_miss"],finalHousingData_Train[,"date_of_sale_miss"]) # These are the 2 perfectly correlated columns where i!=j
+
+#This perfect correlation existing makes conceptual sense, since a sale price missing implies there is no date of sale.
 ```
 
 
 
 Feature Selection (Using Results From Feature Importance & Collinearity Exploration)
 ```{r}
+#Here we implement feature selection based on the results provided from RFE and our test of perfect linearity between features
+#This was done in an effort to reduce the noise produced by irrelevant features in the  hopes of reducing model prediction error
 
+#Let's get a list of our features ranked by importance from the previous cell
+varImp(trained_selection) #Both date_of_sale_miss and sale_price_miss score low and nearly identically
+
+#Thinking about this logically, it would be wise to retain sale_price_miss for the following reasons.
+#For starters, sale_price was imputed and so it would be wise to retain a marker indicating this
+#The sale price missing leads to there being no date of sale. No date of sale can just mean that is was never marked but a sale may have still occured
+#This is a judgement call here and we choose to retain sale_price_miss
+
+#Get the subset of features from the trained selection
+subsetF = c(predictors(trained_selection))
+
+subsetF = subsetF[!subsetF %in% c("date_of_sale_miss")]
+
+#Create a secondary finalHousingData table with only our selected features & response
+finalHousingDataImpFeat_Train = finalHousingData_Train[,..subsetF]
+
+#Add back our sale price since subsetF did not include sale_price as it was excluded from feature importance due to it being our response
+finalHousingDataImpFeat_Train[,sale_price := finalHousingData_Train[,c("sale_price")]]
 
 ```
 
 
 
-Establishing New Data Table (Subset of finalHousingData)
+Establishing Holdout Set II
 ```{r}
+#Since we are creating a secondary data set with only our selected features we want to use the same holdout set created above without unselected features
+#We do this so that we can truly consider our hold out test set on the sub features to be independent from any of the processes we do below
 
-#Subset of features we will be using from finalHousingData
-subsetF = c(predictors(trained_selection),"sale_price") # Add back sale price since we excluded it from feature importance
+finalHousingDataImpFeat_Test = finalHousingData_Test[,..subsetF]
+#Add back our sale price since subsetF did not include sale_price as it was excluded from feature importance due to it being our response
+finalHousingDataImpFeat_Test[,sale_price := finalHousingData_Test[,c("sale_price")]] #This is our holdout set here
 
-finalHousingData_Sub = finalHousingData[,..subsetF]
+X_imp_holdout = finalHousingDataImpFeat_Test[,!c("sale_price")]
+y_imp_holdout = finalHousingDataImpFeat_Test$sale_price
 
-#finalHousingData_sub where the features < features from finalHousingData
-finalHousingData_Sub
+finalHousingDataImpFeat_Train 
+finalHousingDataImpFeat_Test 
 ```
 
 
 
-Establishing Holdout Sets (Full & Sub Data Set)
+Quick Check on our Full Feature Set and Important Feature Set
 ```{r}
+#Ensure the rows in both are the same...columns will obviously be different since *ImpFeat* contains less features
+setequal(dim(finalHousingData_Train)[1], dim(finalHousingDataImpFeat_Train)[1])
+setequal(dim(finalHousingData_Test)[1], dim(finalHousingDataImpFeat_Test)[1])
+```
 
 
+
+Splitting Sets Into Train & Test
+```{r}
+#Let's leave ~10% of our total data for testing
+K=10
+prop = 1 /K
+
+#All Feature Set
+#Training & Testing data (All Features)
+trainIndices_all = sample(1 : nrow(finalHousingData_Train), round((1 - prop) * nrow(finalHousingData_Train)))
+testIndices_all =  setdiff(1 : nrow(finalHousingData_Train), trainIndices_all)
+
+finalHousingData_subTrain = finalHousingData_Train[trainIndices_all,] 
+finalHousingData_subTest = finalHousingData_Train[testIndices_all,] 
+X_train_all= finalHousingData_subTrain[,!c("sale_price")]
+y_train_all = finalHousingData_subTrain$sale_price
+
+X_test_all = finalHousingData_subTest[,!c("sale_price")]
+y_test_all = finalHousingData_subTest$sale_price
+
+##########################################################################################################
+#Important Feature Set
+#Training & Testing data (Important Features)
+trainIndices_imp = sample(1 : nrow(finalHousingDataImpFeat_Train), round((1 - prop) * nrow(finalHousingDataImpFeat_Train)))
+testIndices_imp = setdiff(1 : nrow(finalHousingDataImpFeat_Train), trainIndices_imp)
+
+finalHousingDataImpFeat_subTrain = finalHousingDataImpFeat_Train[trainIndices_imp,]
+finalHousingDataImpFeat_subTest = finalHousingDataImpFeat_Train[testIndices_imp]
+X_train_imp= finalHousingDataImpFeat_subTrain[,!c("sale_price")]
+y_train_imp = finalHousingDataImpFeat_subTrain$sale_price
+
+X_test_imp = finalHousingDataImpFeat_subTest[,!c("sale_price")]
+y_test_imp = finalHousingDataImpFeat_subTest$sale_price
+```
+
+
+
+Quick Check For Above Cell
+```{r}
+setequal((dim(finalHousingData_subTrain)[1]+dim(finalHousingData_subTest)[1]), dim(finalHousingData_Train)[1])
+setequal((dim(finalHousingDataImpFeat_subTrain)[1]+dim(finalHousingDataImpFeat_subTest)[1]), dim(finalHousingDataImpFeat_Train)[1])
 ```
 
 
 
 Linear Regression Model (Full Data Set)
 ```{r}
+#Lets run a traditional OLS with all of our features
 
+lin_mod_all = lm(y_train_all~.,X_train_all,x = TRUE, y = TRUE)
 
+#Test set performance
+yHats_OLS_test_all = predict(lin_mod_all,X_test_all)
+
+oosRMSE_OLS_test_all = sqrt(sum((y_test_all-yHats_OLS_test_all)^2)/length(y_test_all))
+
+#Hold out set performance
+yHats_OLS_holdout_all = predict(lin_mod_all,X_all_holdout)
+
+oosRMSE_OLS_holdout_all = sqrt(sum((y_all_holdout-yHats_OLS_holdout_all)^2)/length(y_all_holdout))
+
+oosRMSE_OLS_test_all
+oosRMSE_OLS_holdout
+
+#Notice we are being warned about a rank deficiency in our full feature data set. This is expected since the features are too closely correlated
+#We should not trust the first value because of this
 ```
 
 
 Linear Regression Model (Sub Data Set)
 ```{r}
+#Lets run a traditional OLS with all of our features
 
+lin_mod_imp = lm(y_train_imp~.,X_train_imp,x = TRUE, y = TRUE)
+
+#Test set performance
+yHats_OLS_test_imp = predict(lin_mod_imp,X_test_imp)
+
+oosRMSE_OLS_test_imp = sqrt(sum((y_test_imp-yHats_OLS_test_imp)^2)/length(y_test_imp))
+
+#Hold out set performance
+yHats_OLS_holdout_imp = predict(lin_mod_imp,X_imp_holdout)
+
+oosRMSE_OLS_holdout_imp = sqrt(sum((y_imp_holdout-yHats_OLS_holdout_imp)^2)/length(y_imp_holdout))
+
+oosRMSE_OLS_test_imp
+oosRMSE_OLS_holdout_imp
 
 ```
 
@@ -554,72 +706,194 @@ Linear Regression Model (Sub Data Set)
 Cross Validated Linear Model (Full & Sub Data Set)
 ```{r}
 
+train_cv = trainControl(method = "cv", number = K)
 
+#Create a model that is cross validated on the training portion of our all feature data
+ols_all_cv = train(sale_price~., data=data.matrix(finalHousingData_subTrain),method="lm", trControl = train_cv)
+
+#Create a model that is cross validated on the training portion of our important feature data
+ols_imp_cv = train(sale_price~., data=data.matrix(finalHousingDataImpFeat_subTrain),method="lm", trControl = train_cv)
+
+#Predict for both models
+yHats_OLS_all_cvTest = predict(ols_all_cv,data.matrix(X_test_all))
+
+yHats_OLS_imp_cvTest = predict(ols_imp_cv,data.matrix(X_test_imp))
+
+
+#Test set performance
+oosRMSE_OLS_all_cvTest = sqrt(sum((y_test_all-yHats_OLS_all_cvTest)^2)/length(y_test_all)) #Here there is no difference between y_test and y_test_sub
+oosRMSE_OLS_imp_cvTest = sqrt(sum((y_test_imp-yHats_OLS_imp_cvTest)^2)/length(y_test_imp)) #It is done merely for consistency in var names
+
+#Predict for both models
+yHats_OLS_all_cvHoldout = predict(ols_all_cv,data.matrix(X_all_holdout))
+yHats_OLS_imp_cvHoldout = predict(ols_imp_cv,data.matrix(X_imp_holdout))
+
+#Hold out set performance
+oosRMSE_OLS_all_cvHoldout = sqrt(sum((y_all_holdout-yHats_OLS_all_cvHoldout)^2)/length(y_all_holdout))
+oosRMSE_OLS_imp_cvHoldout = sqrt(sum((y_imp_holdout-yHats_OLS_imp_cvHoldout)^2)/length(y_imp_holdout))
+
+
+
+oosRMSE_OLS_all_cvTest
+oosRMSE_OLS_all_cvHoldout
+
+oosRMSE_OLS_imp_cvTest
+oosRMSE_OLS_imp_cvHoldout
+
+#Notice we are being warned about a rank deficiency in our full feature data set. This is expected since the features are too closely correlated
+#We should not trust the first two values because of this
 ```
 
 
 
 Linear Regression Model Cross Validated Lasso (Full Dataset)
 ```{r}
+#This is mainly for fun to see how a cross validated Lasso Regression Model can tame the rank deficiency in our full feature data set
+lin_mod_lasso = cv.glmnet(data.matrix(X_train_all),y_train_all,nfolds=K,alpha = 1)
+opt_Lambda = lin_mod_lasso$lambda.min
 
+#Test Performance
+yHats_LassoTest = predict(lin_mod_lasso, data.matrix(X_test_all),s = opt_Lambda)
 
+oosRMSE_Lasso_Test = sqrt(sum((y_test_all-yHats_LassoTest)^2)/length(y_test_all))
+
+#Holdout Set Performance
+yHats_LassoHoldout = predict(lin_mod_lasso, data.matrix(X_all_holdout),s = opt_Lambda)
+
+oosRMSE_Lasso_Holdout = sqrt(sum((y_all_holdout-yHats_LassoHoldout)^2)/length(y_all_holdout))
+
+oosRMSE_Lasso_Test
+oosRMSE_Lasso_Holdout
+#At this point we will stop using the full feature data and stick with our important feature data set
 ```
 
 
 
-Regression Tree Model (Full Data Set)
+Regression Tree Model (Important Feature Data Set)
 ```{r}
+#Lets fit a regression tree to our important feature set
+regTree_mod = YARFCART(X_train_imp, y_train_imp, calculate_oob_error = FALSE)
+
+#Test performance
+yHats_RegTree_Test = predict(regTree_mod,X_test_imp)
+
+oosRMSE_RegTree_Test = sqrt(sum((y_test_imp-yHats_RegTree_Test)^2)/length(y_test_imp))
+
+#Holdout Set Performance
+yHats_RegTree_Holdout = predict(regTree_mod,X_imp_holdout)
+
+oosRMSE_RegTree_Holdout = sqrt(sum((y_imp_holdout-yHats_RegTree_Holdout)^2)/length(y_imp_holdout))
 
 
+oosRMSE_RegTree_Test
+oosRMSE_RegTree_Holdout
 ```
 
 
 
-Regression Tree Model (Sub Data Set)
+Random Forest Model (Important Feature Data Set)
 ```{r}
+#Lets fit a random Forest to our important feature set
+rf_mod = YARF(X_train_imp, y_train_imp, calculate_oob_error = FALSE)
 
+#Test performance 
+yHats_rf_Test = predict(rf_mod,X_test_imp)
 
+oosRMSE_rf_Test = sqrt(sum((y_test_imp-yHats_rf_Test)^2)/length(y_test_imp))
+
+#Holdout Set Performance
+yHats_rf_Holdout = predict(rf_mod,X_imp_holdout)
+
+oosRMSE_rf_Holdout = sqrt(sum((y_imp_holdout-yHats_rf_Holdout)^2)/length(y_imp_holdout))
+
+oosRMSE_rf_Test
+oosRMSE_rf_Holdout
 ```
 
 
 
-Random Forest Model (Full Data Set)
+Bagged Random Forest Model (Important Feature Data Set)
 ```{r}
+#Lets fit a bagged random forest to our important feature set
+rfBag_mod = YARFBAG(X_train_imp, y_train_imp, calculate_oob_error = TRUE)
 
+#Out of Bag Performance
+oosRMSE_brf_Bag = rfBag_mod$rmse_oob
 
-```
+#Holdout Set Performance
+yHats_brf_Holdout = predict(rfBag_mod,X_imp_holdout)
 
+oosRMSE_brf_Holdout = sqrt(sum((y_imp_holdout-yHats_brf_Holdout)^2)/length(y_imp_holdout))
 
-
-Random Forest Model (Sub Data Set)
-```{r}
-
-
-```
-
-
-
-Bagged Random Forest Model (Full Data Set)
-```{r}
-
-
-```
-
-
-
-Bagged Random Forest Model (Sub Data Set)
-```{r}
-
-
+oosRMSE_brf_Bag
+oosRMSE_brf_Holdout
 ```
 
 
 
 Bagged Random Forest Model Optimization (Hyper-Parameter Tuning)
 ```{r}
+#Hyper-Parameter Tuning
+#Setting up parallelization cluster
+cluster = makePSOCKcluster(num_of_cores)
+registerDoParallel(cluster)
 
+
+control_rf = trainControl(method='oob', number=K, search = 'random')
+
+mtry = ncol(finalHousingDataImpFeat_subTrain) # Columns in our important feature set
+nTree = 1000
+tunegrid = expand.grid(.mtry=seq(1,mtry))
+
+rf_optimized = train(sale_price~., 
+                      data=data.matrix(finalHousingDataImpFeat_subTrain), 
+                      method='rf', 
+                      metric='RMSE', 
+                      tuneGrid=tunegrid,
+                      nTree = nTree,
+                      trControl=control_rf
+                     )
+
+#Stop the cluster
+stopCluster(cluster)
+registerDoSEQ()
+
+
+print(rf_optimized)
 
 ```
 
 
+Final Shipped Model Trained On All Data
+```{r}
+#Hyper-Parameter Tuning
+#Setting up parallelization cluster
+cluster = makePSOCKcluster(num_of_cores)
+registerDoParallel(cluster)
 
+#Lets combine the Train and Test Portion of our important feature data set into a single entity
+finalHousingData_ImpFeat = rbind(finalHousingDataImpFeat_Train,finalHousingDataImpFeat_Test)
+
+control_rf = trainControl(method='oob', number=K, search = 'random')
+
+mtry = ncol(finalHousingData_ImpFeat) # Columns in our important feature set
+nTree = 1000
+tunegrid = expand.grid(.mtry=seq(1,mtry))
+
+rf_optimizedFinal = train(sale_price~., 
+                      data=data.matrix(finalHousingData_ImpFeat), 
+                      method='rf', 
+                      metric='RMSE', 
+                      tuneGrid=tunegrid,
+                      nTree = nTree,
+                      trControl=control_rf
+                     )
+
+#Stop the cluster
+stopCluster(cluster)
+registerDoSEQ()
+
+
+print(rf_optimizedFinal)
+
+```
