@@ -200,7 +200,8 @@ length(which(housingData$dining_room_type == "dining area")) #dining area occurs
 
 #Lets deal with the issue of "dining area" as the room type and consider it as type other
 housingData$dining_room_type[grepl("dining area", housingData$dining_room_type)] = "other"
-length(unique(housingData[,dining_room_type])) # 5 unique values including NA
+housingData$dining_room_type[grepl("none", housingData$dining_room_type)] = "other"
+length(unique(housingData[,dining_room_type])) # 4 unique values including NA
 
 housingData[,dining_room_type := factor(dining_room_type)]
 levels(housingData$dining_room_type)
@@ -757,7 +758,7 @@ Rsq_olsImp_cvHoldout = 1 - SSR_olsImp_cvHoldout/SST_olsImp_cvHoldout
 oosRMSE_OLS_all_cvTest
 oosRMSE_OLS_all_cvHoldout
 
-coefficients(lin_mod_lasso)
+
 oosRMSE_OLS_imp_cvTest
 oosRMSE_OLS_imp_cvHoldout
 Rsq_olsImp_cvHoldout
